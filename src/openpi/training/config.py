@@ -20,7 +20,9 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.sonic_policy as sonic_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -89,6 +91,11 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Tactile (HTD): if set, the loader reads this column over a window of `tactile_horizon`
+    # frames (current + future) for the dream auxiliary task. None disables tactile windowing.
+    tactile_key: str | None = None
+    tactile_horizon: int = 5
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -355,6 +362,106 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         )
 
 
+def _read_sonic_state_spans(repo_id: str) -> dict | None:
+    """Read each SONIC joint group's (start, end) span in the raw observation.state column.
+
+    Reads ``<HF_LEROBOT_HOME>/<repo_id>/meta/modality.json`` and returns the spans of the
+    groups that physically live in the ``observation.state`` column (those WITHOUT an
+    ``original_key``, i.e. legs/waist/arms/hands — projected_gravity etc. are separate columns).
+    Returns None if the file can't be read (the caller falls back to the default layout).
+    """
+    import json
+    import os
+
+    home = (
+        os.environ.get("HF_LEROBOT_HOME")
+        or os.environ.get("LEROBOT_HOME")
+        or str(pathlib.Path.home() / ".cache" / "huggingface" / "lerobot")
+    )
+    modality_path = pathlib.Path(home) / repo_id / "meta" / "modality.json"
+    try:
+        state = json.loads(modality_path.read_text())["state"]
+    except (FileNotFoundError, KeyError, ValueError):
+        logging.info(f"SONIC: modality.json not found at {modality_path}; using default state spans.")
+        return None
+    spans = {k: (v["start"], v["end"]) for k, v in state.items() if "original_key" not in v}
+    missing = set(sonic_policy.STATE_GROUP_ORDER) - set(spans)
+    if missing:
+        logging.warning(f"SONIC: modality.json missing state groups {missing}; using default state spans.")
+        return None
+    logging.info(f"SONIC: loaded state spans from {modality_path}")
+    return spans
+
+
+@dataclasses.dataclass(frozen=True)
+class SonicDataConfig(DataConfigFactory):
+    """Config for finetuning pi0.5 on the GR00T Unitree G1 SONIC LeRobot dataset.
+
+    The dataset exposes the SONIC action as three separate columns; we read them as action
+    sequences (horizon=40) and concatenate them into a single 78-d action in ``SonicInputs``.
+    Actions are ABSOLUTE (motion_token is a SONIC latent, hand joints are absolute), so NO
+    delta/absolute conversion is applied.
+    """
+
+    # Action columns read as sequences (length = model action_horizon) and concatenated, in
+    # this order, into the 78-d action by SonicInputs.
+    action_sequence_keys: Sequence[str] = (
+        "action.motion_token",
+        "teleop.left_hand_joints",
+        "teleop.right_hand_joints",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Derive the raw-column span of each state group from the dataset's modality.json so the
+        # training-time 46-d state assembly matches the inference order for ANY SONIC dataset
+        # (eliminates hand-typed-index risk). Falls back to the default layout if unavailable
+        # (e.g. at inference, where the bridge sends a pre-assembled 46-d state and spans are unused).
+        state_spans = _read_sonic_state_spans(self.repo_id)
+
+        # Tactile (HTD): only wired when the model has use_tactile=True.
+        use_tactile = getattr(model_config, "use_tactile", False)
+        tactile_key = "observation.tactile_raw" if use_tactile else None
+        tactile_horizon = getattr(model_config, "dream_horizon", 4) + 1  # current + tau future frames
+
+        # Repack maps raw dataset columns -> the canonical keys consumed by SonicInputs.
+        # (new_key: dataset_column). The action sequence columns are renamed to the short
+        # keys SonicInputs concatenates; state is reassembled from state_43 + projected_gravity.
+        repack_map = {
+            "ego_view_left": "observation.images.ego_view_left",
+            "ego_view_right": "observation.images.ego_view_right",
+            "state_43": "observation.state",
+            "projected_gravity": "observation.projected_gravity",
+            "motion_token": "action.motion_token",
+            "left_hand_joints": "teleop.left_hand_joints",
+            "right_hand_joints": "teleop.right_hand_joints",
+            # prompt is injected by PromptFromLeRobotTask (prompt_from_task=True);
+            # preserve it through the repack (RepackTransform keeps only mapped keys).
+            "prompt": "prompt",
+        }
+        if use_tactile:
+            repack_map["tactile"] = "observation.tactile_raw"
+        repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_map)])
+
+        data_transforms = _transforms.Group(
+            inputs=[sonic_policy.SonicInputs(model_type=model_config.model_type, state_spans=state_spans)],
+            outputs=[sonic_policy.SonicOutputs()],
+        )
+        # NOTE: no DeltaActions/AbsoluteActions — SONIC actions are absolute.
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            tactile_key=tactile_key,
+            tactile_horizon=tactile_horizon,
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
@@ -534,6 +641,13 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
+    # ---- Tactile (HTD touch-dreaming) training hyper-parameters ----
+    # Weight of the dream auxiliary loss: total = action_loss + lambda_tactile * dream_loss.
+    # Only has effect when the model has use_tactile=True (otherwise dream_loss is 0).
+    lambda_tactile: float = 0.5
+    # EMA decay for the tactile teacher (updated each step: teacher <- d*teacher + (1-d)*student).
+    tactile_ema_decay: float | None = 0.99
+
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
@@ -549,7 +663,13 @@ class TrainConfig:
     @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
         """Get the filter for the trainable parameters."""
-        return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
+        # Always exclude the tactile EMA teacher: it receives no gradients and is updated only
+        # by the EMA copy in train_step. Harmless when tactile is disabled (no such params exist).
+        return nnx.All(
+            nnx.Param,
+            nnx.Not(self.freeze_filter),
+            nnx.Not(nnx_utils.PathRegex(".*tactile_teacher.*")),
+        )
 
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
@@ -759,6 +879,38 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    #
+    # Finetune pi0.5 for the Unitree G1 SONIC embodiment (GR00T unitree_g1_sonic).
+    # Action space: motion_token(64) | left_hand_joints(7) | right_hand_joints(7) = 78-d @ horizon 40.
+    # Uses PartialCheckpointWeightLoader to reinit the resized action-head projections.
+    # Before running: export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
+    #
+    TrainConfig(
+        name="pi05_sonic",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=sonic_policy.SONIC_ACTION_DIM,  # 78
+            action_horizon=40,
+            discrete_state_input=False,
+        ),
+        data=SonicDataConfig(
+            repo_id="carry-bucket-stereo",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
         num_train_steps=30_000,
     ),
     #

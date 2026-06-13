@@ -55,6 +55,46 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class PartialCheckpointWeightLoader(WeightLoader):
+    """Loads a checkpoint but reinitializes the action-head projections.
+
+    Use this when finetuning a base model with a DIFFERENT ``action_dim`` than the base was
+    trained with (e.g. SONIC needs action_dim=78 vs the base's 32). The VLM + action-expert
+    backbone is loaded from the checkpoint, while the layers whose shape is tied to
+    ``action_dim`` (``action_in_proj``, ``action_out_proj``, and ``state_proj`` for non-pi05)
+    are left at their fresh initialization.
+
+    Mechanism: any loaded param that matches ``skip_regex`` OR whose shape differs from the
+    fresh reference is dropped before merging; ``_merge_params`` then re-fills those keys from
+    the reference (fresh ``ShapeDtypeStruct``), which passes ``check_pytree_equality`` and is
+    subsequently left at init by the training loop.
+    """
+
+    params_path: str
+    skip_regex: str = r"(.*/)?(action_in_proj|action_out_proj|state_proj)/.*"
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
+        flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+
+        pattern = re.compile(self.skip_regex)
+        dropped = []
+        for k in list(flat_loaded):
+            ref = flat_ref.get(k)
+            shape_mismatch = ref is not None and getattr(flat_loaded[k], "shape", None) != getattr(ref, "shape", None)
+            if pattern.fullmatch(k) or shape_mismatch:
+                del flat_loaded[k]
+                dropped.append(k)
+        if dropped:
+            logger.info("PartialCheckpointWeightLoader: reinitializing %d param(s) from fresh init: %s", len(dropped), sorted(dropped))
+
+        loaded_params = flax.traverse_util.unflatten_dict(flat_loaded, sep="/")
+        # Re-fill the dropped projections (and any LoRA) from the fresh reference params.
+        return _merge_params(loaded_params, params, missing_regex=r".*lora.*|" + self.skip_regex)
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 

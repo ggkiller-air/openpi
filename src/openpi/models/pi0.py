@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models import tactile as _tactile
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -99,6 +100,23 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # ---- Tactile (HTD touch-dreaming) ----
+        # Built only when enabled, so use_tactile=False is byte-identical to the baseline.
+        # embed == d_trunk == action expert width (gemma_300m = 1024) for pi0.5.
+        self.use_tactile = config.use_tactile
+        if config.use_tactile:
+            embed = action_expert_config.width
+            self.dream_horizon = config.dream_horizon
+            self.tactile_encoder = _tactile.TactileEncoder(
+                encoder_type=config.tactile_encoder_type, embed=embed, rngs=rngs
+            )
+            # Frozen EMA teacher; starts identical to the student, updated each step in train.py.
+            self.tactile_teacher = _tactile.TactileEncoder(
+                encoder_type=config.tactile_encoder_type, embed=embed, rngs=rngs
+            )
+            nnx.update(self.tactile_teacher, nnx.state(self.tactile_encoder))
+            self.dream_head = _tactile.DreamHead(embed, embed, tau=config.dream_horizon, rngs=rngs)
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
@@ -176,6 +194,18 @@ class Pi0(_model.BaseModel):
             action_time_tokens = self.action_time_mlp_out(action_time_tokens)
             action_expert_tokens = action_time_tokens
             adarms_cond = None
+
+        # Inject tactile context tokens BEFORE the action tokens. They form their own block
+        # (ar_mask True at the boundary) so the prefix cannot attend to them, but the action
+        # tokens (a later block) can attend to them as context. The action-decode slice stays
+        # the last `action_horizon` tokens, so action decoding is unchanged.
+        if self.use_tactile:
+            tactile_tokens = self.tactile_encoder(obs.tactile[:, 0]).astype(action_expert_tokens.dtype)
+            n_tac = tactile_tokens.shape[1]
+            tokens.append(tactile_tokens)
+            input_mask.append(jnp.ones((tactile_tokens.shape[0], n_tac), dtype=jnp.bool_))
+            ar_mask += [True] + ([False] * (n_tac - 1))
+
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
         # image/language/state inputs do not attend to action tokens
@@ -188,7 +218,9 @@ class Pi0(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ):
+        # Returns the per-(b, ah) action loss. When tactile is enabled, returns
+        # (chunked_loss, dream_aux_scalar) so the training loop can add lambda * aux.
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -211,7 +243,22 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        chunked_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+        if not self.use_tactile:
+            return chunked_loss
+
+        # HTD dream auxiliary loss. The tactile tokens occupy the first `n_tac` suffix positions
+        # (after the optional state token for non-pi05). Read the trunk hidden states there,
+        # mean-pool, and predict the FUTURE tactile latent; target comes from the EMA teacher.
+        n_tac = self.tactile_encoder.n
+        tac_start = 0 if self.pi05 else 1
+        trunk = suffix_out[:, tac_start : tac_start + n_tac].mean(axis=1)  # [b, width]
+        z_hat = self.dream_head(trunk)  # [b, tau, embed]
+        future = observation.tactile[:, 1 : 1 + self.dream_horizon]  # [b, tau, 256]
+        z_star = jax.lax.stop_gradient(self.tactile_teacher.encode_pooled(future))  # [b, tau, embed]
+        aux = _tactile.dream_loss(z_hat, z_star, beta=1.0)  # spec default beta
+        return chunked_loss, aux
 
     @override
     def sample_actions(

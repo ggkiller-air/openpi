@@ -143,19 +143,27 @@ def train_step(
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
-    @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        out = model.compute_loss(rng, observation, actions, train=True)
+        # Tactile-enabled pi0 returns (chunked_loss, dream_aux_scalar); others return chunked_loss.
+        if isinstance(out, tuple):
+            chunked_loss, dream_aux = out
+        else:
+            chunked_loss, dream_aux = out, jnp.asarray(0.0)
+        action_loss = jnp.mean(chunked_loss)
+        total_loss = action_loss + config.lambda_tactile * dream_aux
+        return total_loss, (action_loss, dream_aux)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, (action_loss, dream_aux)), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -164,6 +172,17 @@ def train_step(
     # Update the model in place and return the new full state.
     nnx.update(model, new_params)
     new_params = nnx.state(model)
+
+    # Tactile teacher EMA: teacher <- decay*teacher + (1-decay)*student. The teacher is frozen
+    # (excluded from trainable_filter, no gradient) and only moves via this copy. The two
+    # submodules have identical structure, so jax.tree.map blends them by structure.
+    if getattr(model, "use_tactile", False) and config.tactile_ema_decay is not None:
+        d = config.tactile_ema_decay
+        student_state = nnx.state(model.tactile_encoder)
+        teacher_state = nnx.state(model.tactile_teacher)
+        blended = jax.tree.map(lambda t, s: d * t + (1.0 - d) * s, teacher_state, student_state)
+        nnx.update(model.tactile_teacher, blended)
+        new_params = nnx.state(model)
 
     new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
     if state.ema_decay is not None:
@@ -185,6 +204,8 @@ def train_step(
     )
     info = {
         "loss": loss,
+        "action_loss": action_loss,
+        "dream_loss": dream_aux,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }

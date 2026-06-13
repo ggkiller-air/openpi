@@ -32,6 +32,14 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # ---- Tactile (HTD touch-dreaming) ----
+    # When False, no tactile modules are built and the model is identical to the baseline.
+    use_tactile: bool = False
+    # Per-region encoder variant: "mlp" (implemented) | "cnn" | "coord" (wired, not yet implemented).
+    tactile_encoder_type: str = "mlp"
+    # Number of future frames predicted by the dream head (tau). Tactile window = dream_horizon + 1.
+    dream_horizon: int = 4
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
@@ -80,6 +88,12 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                # Tactile window [B, dream_horizon+1, 256] uint8 (index 0 = current frame).
+                tactile=(
+                    jax.ShapeDtypeStruct([batch_size, self.dream_horizon + 1, 256], jnp.uint8)
+                    if self.use_tactile
+                    else None
+                ),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
