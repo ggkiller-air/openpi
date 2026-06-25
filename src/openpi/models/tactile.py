@@ -64,12 +64,14 @@ class PerRegionMLP(nnx.Module):
 
     def __init__(self, sizes, hidden: int, embed: int, *, rngs: nnx.Rngs):
         self.sizes = tuple(int(s) for s in sizes)
-        self.branches = [_SmallMLP(n, hidden, embed, rngs=rngs) for n in self.sizes]
+        # Use nnx.Dict with string keys (NOT a Python list): list submodules get integer keys
+        # in the param tree, which break the weight loader's flatten_dict(sep="/").
+        self.branches = nnx.Dict({str(i): _SmallMLP(n, hidden, embed, rngs=rngs) for i, n in enumerate(self.sizes)})
 
     def __call__(self, x):  # x: [B, sum(sizes)] -> [B, R, embed]
         splits = np.cumsum(self.sizes)[:-1].tolist()
         parts = jnp.split(x, splits, axis=-1)
-        return jnp.stack([b(p) for b, p in zip(self.branches, parts)], axis=1)
+        return jnp.stack([self.branches[str(i)](p) for i, p in enumerate(parts)], axis=1)
 
 
 def _pool_matrix(in_size: int, out_size: int) -> np.ndarray:
@@ -121,15 +123,22 @@ class PerRegionCNN(nnx.Module):
         self.coord_scale = float(coord_scale)
         self.pools = [(min(pool[0], r), min(pool[1], c)) for r, c in self.grids]
         in_ch = 1 + (2 if coord else 0)
-        self.convs = [nnx.Conv(in_ch, ch, kernel_size=(3, 3), padding="SAME", rngs=rngs) for _ in self.grids]
-        self.projs = [nnx.Linear(ch * ph * pw, embed, rngs=rngs) for (ph, pw) in self.pools]
+        # nnx.Dict with string keys (see PerRegionMLP note): avoids integer param-tree keys.
+        self.convs = nnx.Dict(
+            {str(i): nnx.Conv(in_ch, ch, kernel_size=(3, 3), padding="SAME", rngs=rngs) for i in range(len(self.grids))}
+        )
+        self.projs = nnx.Dict(
+            {str(i): nnx.Linear(ch * ph * pw, embed, rngs=rngs) for i, (ph, pw) in enumerate(self.pools)}
+        )
 
     def __call__(self, x):  # x: [B, sum(rows*cols)] -> [B, R, embed]
         sizes = [r * c for r, c in self.grids]
         splits = np.cumsum(sizes)[:-1].tolist()
         parts = jnp.split(x, splits, axis=-1)
         out = []
-        for (r, c), conv, proj, (ph, pw), p in zip(self.grids, self.convs, self.projs, self.pools, parts):
+        for i, ((r, c), (ph, pw), p) in enumerate(zip(self.grids, self.pools, parts)):
+            conv = self.convs[str(i)]
+            proj = self.projs[str(i)]
             b = p.shape[0]
             g = p.reshape(b, r, c, 1)  # NHWC single channel (row-major, matches PyTorch content)
             if self.coord:

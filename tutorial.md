@@ -32,15 +32,15 @@ uv run python scripts/compute_norm_stats.py --config-name=pi05_sonic
 tmux new -s sonic_ft
 
 export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
-export CUDA_VISIBLE_DEVICES=1,2,3,4   # 想用几张就写几张(8×80GB 数据并行最快)
+export CUDA_VISIBLE_DEVICES=0,1,2,3   # 想用几张就写几张(8×80GB 数据并行最快)
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python scripts/train.py pi05_sonic \
-    --exp-name=sonic_v1 \
+    --exp-name=tactile_coord \
     --num-train-steps=20000 \
     --save-interval=10000 \
     --num-workers=16 \
     --model.use-tactile \
-    --model.tactile-encoder-type mlp \
+    --model.tactile-encoder-type coord \
     --overwrite \
 # checkpoint 存到 checkpoints/pi05_sonic/sonic_v1/<step>
 # 仅当单卡显存不够时(<70GB)才需要把模型切片: 加 --fsdp-devices <卡数>

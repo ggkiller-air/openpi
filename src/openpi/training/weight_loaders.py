@@ -64,10 +64,12 @@ class PartialCheckpointWeightLoader(WeightLoader):
     ``action_dim`` (``action_in_proj``, ``action_out_proj``, and ``state_proj`` for non-pi05)
     are left at their fresh initialization.
 
-    Mechanism: any loaded param that matches ``skip_regex`` OR whose shape differs from the
-    fresh reference is dropped before merging; ``_merge_params`` then re-fills those keys from
-    the reference (fresh ``ShapeDtypeStruct``), which passes ``check_pytree_equality`` and is
-    subsequently left at init by the training loop.
+    Mechanism: iterate over the FRESH reference keys. A key is left at its fresh init when it
+    (a) is absent from the base checkpoint (a new finetune param, e.g. the tactile encoder /
+    dream head), (b) matches ``skip_regex`` (the resized action head), or (c) has a different
+    shape than the base. Otherwise it is copied from the base (dtype-cast to the reference).
+    The result therefore has EXACTLY the fresh key set, so ``check_pytree_equality`` passes and
+    the fresh entries are subsequently left at init by the training loop.
     """
 
     params_path: str
@@ -79,19 +81,26 @@ class PartialCheckpointWeightLoader(WeightLoader):
         flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
 
         pattern = re.compile(self.skip_regex)
-        dropped = []
-        for k in list(flat_loaded):
-            ref = flat_ref.get(k)
-            shape_mismatch = ref is not None and getattr(flat_loaded[k], "shape", None) != getattr(ref, "shape", None)
-            if pattern.fullmatch(k) or shape_mismatch:
-                del flat_loaded[k]
-                dropped.append(k)
-        if dropped:
-            logger.info("PartialCheckpointWeightLoader: reinitializing %d param(s) from fresh init: %s", len(dropped), sorted(dropped))
-
-        loaded_params = flax.traverse_util.unflatten_dict(flat_loaded, sep="/")
-        # Re-fill the dropped projections (and any LoRA) from the fresh reference params.
-        return _merge_params(loaded_params, params, missing_regex=r".*lora.*|" + self.skip_regex)
+        result = {}
+        reinit, new = [], []
+        for k, ref_v in flat_ref.items():
+            loaded_v = flat_loaded.get(k)
+            shape_mismatch = loaded_v is not None and getattr(loaded_v, "shape", None) != getattr(ref_v, "shape", None)
+            if loaded_v is None:
+                # New param not present in the base checkpoint (tactile encoder/teacher, dream head).
+                result[k] = ref_v
+                new.append(k)
+            elif pattern.fullmatch(k) or shape_mismatch:
+                # Resized / incompatible param -> leave at fresh init.
+                result[k] = ref_v
+                reinit.append(k)
+            else:
+                result[k] = loaded_v.astype(ref_v.dtype) if loaded_v.dtype != ref_v.dtype else loaded_v
+        if reinit:
+            logger.info("PartialCheckpointWeightLoader: reinitializing %d resized param(s): %s", len(reinit), sorted(reinit))
+        if new:
+            logger.info("PartialCheckpointWeightLoader: %d new param(s) from fresh init (not in base): %s", len(new), sorted(new)[:8])
+        return flax.traverse_util.unflatten_dict(result, sep="/")
 
 
 @dataclasses.dataclass(frozen=True)
