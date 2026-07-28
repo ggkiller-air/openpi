@@ -298,7 +298,11 @@ class TactileEncoder(nnx.Module):
 
     def select_and_normalize(self, raw):  # [..., 256] -> [..., 112] in [0,1]
         sel = jnp.take(raw, jnp.asarray(VALID_IDX, dtype=jnp.int32), axis=-1)
-        return sel.astype(self.agg.norm.scale.value.dtype) / 255.0
+        sel = sel.astype(self.agg.norm.scale.value.dtype)
+        normalized = sel / 255.0
+        # XLA may lower float32 division to reciprocal multiplication, making
+        # 255/255 equal 0.99999994. Preserve the sensor range endpoints exactly.
+        return jnp.where(sel == 255.0, jnp.ones_like(normalized), normalized)
 
     def __call__(self, cur):  # [B, 256] -> [B, N, embed]
         return self.agg(self.per_region(self.select_and_normalize(cur)))
