@@ -91,8 +91,8 @@ class Observation(Generic[ArrayT]):
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
     # Image masks, with same keys as images.
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
-    # Low-dimensional robot state.
-    state: at.Float[ArrayT, "*b s"]
+    # Low-dimensional robot state. State-JEPA adds a time axis: [B, current+future, S].
+    state: at.Float[ArrayT, "... s"]
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -112,6 +112,10 @@ class Observation(Generic[ArrayT]):
     # divides by 255 internally. None when tactile is disabled.
     tactile: at.Array | None = None
 
+    # Future camera frames used only as vision-JEPA targets. Each value is
+    # [*b, vision_horizon, h, w, c] in [-1, 1]. They never enter the policy prefix.
+    future_images: dict[str, at.Array] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -124,6 +128,15 @@ class Observation(Generic[ArrayT]):
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+
+        future_images = data.get("future_images")
+        if future_images is not None:
+            for key in future_images:
+                if future_images[key].dtype == np.uint8:
+                    future_images[key] = future_images[key].astype(np.float32) / 255.0 * 2.0 - 1.0
+                elif hasattr(future_images[key], "dtype") and future_images[key].dtype == torch.uint8:
+                    # PyTorch image tensors are channel-first; retain the future time axis.
+                    future_images[key] = future_images[key].to(torch.float32).permute(0, 1, 4, 2, 3) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -133,6 +146,7 @@ class Observation(Generic[ArrayT]):
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
             tactile=data.get("tactile"),  # passed through raw; encoder normalizes (/255)
+            future_images=future_images,
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -163,7 +177,9 @@ def preprocess_observation(
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
-    batch_shape = observation.state.shape[:-1]
+    # State may carry a JEPA time window [B, T, D], so infer batch dimensions
+    # from the current policy images rather than from state.shape[:-1].
+    batch_shape = next(iter(observation.images.values())).shape[:-3]
 
     out_images = {}
     for key in image_keys:
@@ -195,6 +211,20 @@ def preprocess_observation(
 
         out_images[key] = image
 
+    # Future frames are clean teacher inputs: resize them but do not apply the
+    # stochastic policy-image augmentation. The target encoder is stop-gradient.
+    out_future_images = None
+    if observation.future_images is not None:
+        out_future_images = {}
+        for key, image in observation.future_images.items():
+            if image.ndim != 5:
+                raise ValueError(f"future image {key!r} must have shape [B, T, H, W, C], got {image.shape}")
+            batch, horizon = image.shape[:2]
+            flat = image.reshape(batch * horizon, *image.shape[2:])
+            if flat.shape[1:3] != image_resolution:
+                flat = image_tools.resize_with_pad(flat, *image_resolution)
+            out_future_images[key] = flat.reshape(batch, horizon, *flat.shape[1:])
+
     # obtain mask
     out_masks = {}
     for key in out_images:
@@ -213,6 +243,7 @@ def preprocess_observation(
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
         tactile=observation.tactile,  # passed through untouched (no resize/aug/norm)
+        future_images=out_future_images,
     )
 
 

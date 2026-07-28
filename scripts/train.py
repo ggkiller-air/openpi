@@ -98,6 +98,8 @@ def init_train_state(
             # This will produce an error if the partial params are not a subset of the state.
             state.replace_by_pure_dict(partial_params)
             model = nnx.merge(graphdef, state)
+            if hasattr(model, "sync_jepa_teachers"):
+                model.sync_jepa_teachers()
 
         params = nnx.state(model)
         # Convert frozen params to bfloat16.
@@ -147,23 +149,40 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         out = model.compute_loss(rng, observation, actions, train=True)
-        # Tactile-enabled pi0 returns (chunked_loss, dream_aux_scalar); others return chunked_loss.
+        zero = jnp.asarray(0.0, dtype=jnp.float32)
         if isinstance(out, tuple):
-            chunked_loss, dream_aux = out
+            chunked_loss, auxiliary = out
+            if isinstance(auxiliary, dict):
+                tactile_loss = auxiliary.get("tactile_loss", zero)
+                state_jepa_loss = auxiliary.get("state_jepa_loss", zero)
+                vision_jepa_loss = auxiliary.get("vision_jepa_loss", zero)
+            else:
+                # Compatibility with checkpoints/code from the earlier tactile-only HTD branch.
+                tactile_loss = auxiliary
+                state_jepa_loss = zero
+                vision_jepa_loss = zero
         else:
-            chunked_loss, dream_aux = out, jnp.asarray(0.0)
+            chunked_loss = out
+            tactile_loss = zero
+            state_jepa_loss = zero
+            vision_jepa_loss = zero
         action_loss = jnp.mean(chunked_loss)
-        total_loss = action_loss + config.lambda_tactile * dream_aux
-        return total_loss, (action_loss, dream_aux)
+        total_loss = (
+            action_loss
+            + config.lambda_tactile * tactile_loss
+            + config.lambda_state * state_jepa_loss
+            + config.lambda_vision * vision_jepa_loss
+        )
+        return total_loss, (action_loss, tactile_loss, state_jepa_loss, vision_jepa_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    (loss, (action_loss, dream_aux)), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
-        model, train_rng, observation, actions
-    )
+    (loss, (action_loss, tactile_loss, state_jepa_loss, vision_jepa_loss)), grads = nnx.value_and_grad(
+        loss_fn, argnums=diff_state, has_aux=True
+    )(model, train_rng, observation, actions)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -176,12 +195,17 @@ def train_step(
     # Tactile teacher EMA: teacher <- decay*teacher + (1-decay)*student. The teacher is frozen
     # (excluded from trainable_filter, no gradient) and only moves via this copy. The two
     # submodules have identical structure, so jax.tree.map blends them by structure.
-    if getattr(model, "use_tactile", False) and config.tactile_ema_decay is not None:
+    if getattr(model, "use_tactile_dream", False) and config.tactile_ema_decay is not None:
         d = config.tactile_ema_decay
         student_state = nnx.state(model.tactile_encoder)
         teacher_state = nnx.state(model.tactile_teacher)
         blended = jax.tree.map(lambda t, s: d * t + (1.0 - d) * s, teacher_state, student_state)
         nnx.update(model.tactile_teacher, blended)
+        if getattr(model, "dream_state", False):
+            student_state = nnx.state(model.state_encoder)
+            teacher_state = nnx.state(model.state_teacher)
+            blended = jax.tree.map(lambda t, s: d * t + (1.0 - d) * s, teacher_state, student_state)
+            nnx.update(model.state_teacher, blended)
         new_params = nnx.state(model)
 
     new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
@@ -205,7 +229,9 @@ def train_step(
     info = {
         "loss": loss,
         "action_loss": action_loss,
-        "dream_loss": dream_aux,
+        "tactile_loss": tactile_loss,
+        "state_jepa_loss": state_jepa_loss,
+        "vision_jepa_loss": vision_jepa_loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
@@ -291,7 +317,7 @@ def main(config: _config.TrainConfig):
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, config.model)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

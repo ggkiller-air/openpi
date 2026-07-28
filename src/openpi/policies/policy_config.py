@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import pathlib
@@ -44,6 +45,8 @@ def create_trained_policy(
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+    checkpoint_model_config = _checkpoints.load_jepa_model_config(checkpoint_dir / "assets", train_config.model)
+    train_config = dataclasses.replace(train_config, model=checkpoint_model_config)
 
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")

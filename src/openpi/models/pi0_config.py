@@ -35,10 +35,17 @@ class Pi0Config(_model.BaseModelConfig):
     # ---- Tactile (HTD touch-dreaming) ----
     # When False, no tactile modules are built and the model is identical to the baseline.
     use_tactile: bool = False
-    # Per-region encoder variant: "mlp" (implemented) | "cnn" | "coord" (wired, not yet implemented).
+    # Build the future-target teacher/predictor. This is independent from input-only fusion.
+    use_tactile_dream: bool = False
+    # Per-region encoder variant: "mlp" | "cnn" | "coord".
     tactile_encoder_type: str = "mlp"
     # Number of future frames predicted by the dream head (tau). Tactile window = dream_horizon + 1.
     dream_horizon: int = 4
+    tactile_dream_beta: float = 1.0
+    # Optional JEPA targets predicted from the shared post-tactile trunk.
+    dream_state: bool = False
+    dream_vision: bool = False
+    vision_horizon: int = 4
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -54,6 +61,16 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.use_tactile_dream and not self.use_tactile:
+            raise ValueError("use_tactile_dream requires use_tactile=True")
+        if (self.dream_state or self.dream_vision) and not self.use_tactile_dream:
+            raise ValueError("dream_state and dream_vision require use_tactile_dream=True")
+        if self.dream_horizon < 1:
+            raise ValueError("dream_horizon must be positive")
+        if self.vision_horizon < 1:
+            raise ValueError("vision_horizon must be positive")
+        if self.tactile_dream_beta < 0:
+            raise ValueError("tactile_dream_beta must be non-negative")
 
     @property
     @override
@@ -85,13 +102,30 @@ class Pi0Config(_model.BaseModelConfig):
                     "left_wrist_0_rgb": image_mask_spec,
                     "right_wrist_0_rgb": image_mask_spec,
                 },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                state=jax.ShapeDtypeStruct(
+                    [batch_size, self.dream_horizon + 1, self.action_dim]
+                    if self.dream_state
+                    else [batch_size, self.action_dim],
+                    jnp.float32,
+                ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-                # Tactile window [B, dream_horizon+1, 256] uint8 (index 0 = current frame).
+                # Input-only uses one current frame; dream mode adds future targets.
                 tactile=(
-                    jax.ShapeDtypeStruct([batch_size, self.dream_horizon + 1, 256], jnp.uint8)
+                    jax.ShapeDtypeStruct(
+                        [batch_size, self.dream_horizon + 1 if self.use_tactile_dream else 1, 256], jnp.uint8
+                    )
                     if self.use_tactile
+                    else None
+                ),
+                future_images=(
+                    {
+                        key: jax.ShapeDtypeStruct(
+                            [batch_size, self.vision_horizon, *_model.IMAGE_RESOLUTION, 3], jnp.float32
+                        )
+                        for key in _model.IMAGE_KEYS
+                    }
+                    if self.dream_vision
                     else None
                 ),
             )

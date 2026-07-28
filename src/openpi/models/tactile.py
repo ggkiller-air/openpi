@@ -18,25 +18,126 @@ reimplements it with averaging matrices (matches torch elementwise, incl. non-di
 coord channels are concatenated on the last (channel) axis and scaled by 0.1 (spec gotcha #3).
 """
 
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-import flax.nnx as nnx
 import numpy as np
-
-import openpi.shared.array_typing as at
 
 # ---- Sensor layout (SONIC), region-ordered, 0-based. From GR00T tactile_layout.py. ----
 # Region order: front_chest(48), back(40), left_arm(8), left_shoulder(4), right_arm(8), right_shoulder(4).
 VALID_IDX: tuple[int, ...] = (
-    194, 210, 226, 242, 2, 18, 34, 50, 195, 211, 227, 243, 3, 19, 35, 51, 196, 212, 228, 244,
-    4, 20, 36, 52, 197, 213, 229, 245, 5, 21, 37, 53, 198, 214, 230, 246, 6, 22, 38, 54,
-    199, 215, 231, 247, 7, 23, 39, 55,  # front_chest 48
-    57, 41, 25, 9, 249, 233, 217, 201, 58, 42, 26, 10, 250, 234, 218, 202, 59, 43, 27, 11,
-    251, 235, 219, 203, 60, 44, 28, 12, 252, 236, 220, 204, 61, 45, 29, 13, 253, 237, 221, 205,  # back 40
-    78, 94, 110, 126, 79, 95, 111, 127,  # left_arm 8
-    8, 24, 40, 56,  # left_shoulder 4
-    176, 161, 145, 129, 177, 160, 144, 128,  # right_arm 8
-    248, 232, 216, 200,  # right_shoulder 4
+    194,
+    210,
+    226,
+    242,
+    2,
+    18,
+    34,
+    50,
+    195,
+    211,
+    227,
+    243,
+    3,
+    19,
+    35,
+    51,
+    196,
+    212,
+    228,
+    244,
+    4,
+    20,
+    36,
+    52,
+    197,
+    213,
+    229,
+    245,
+    5,
+    21,
+    37,
+    53,
+    198,
+    214,
+    230,
+    246,
+    6,
+    22,
+    38,
+    54,
+    199,
+    215,
+    231,
+    247,
+    7,
+    23,
+    39,
+    55,  # front_chest 48
+    57,
+    41,
+    25,
+    9,
+    249,
+    233,
+    217,
+    201,
+    58,
+    42,
+    26,
+    10,
+    250,
+    234,
+    218,
+    202,
+    59,
+    43,
+    27,
+    11,
+    251,
+    235,
+    219,
+    203,
+    60,
+    44,
+    28,
+    12,
+    252,
+    236,
+    220,
+    204,
+    61,
+    45,
+    29,
+    13,
+    253,
+    237,
+    221,
+    205,  # back 40
+    78,
+    94,
+    110,
+    126,
+    79,
+    95,
+    111,
+    127,  # left_arm 8
+    8,
+    24,
+    40,
+    56,  # left_shoulder 4
+    176,
+    161,
+    145,
+    129,
+    177,
+    160,
+    144,
+    128,  # right_arm 8
+    248,
+    232,
+    216,
+    200,  # right_shoulder 4
 )
 REGION_SIZES: tuple[int, ...] = (48, 40, 8, 4, 8, 4)  # sum == 112
 REGION_GRIDS: tuple[tuple[int, int], ...] = ((6, 8), (5, 8), (2, 4), (1, 4), (2, 4), (1, 4))  # cnn/coord only
@@ -136,7 +237,7 @@ class PerRegionCNN(nnx.Module):
         splits = np.cumsum(sizes)[:-1].tolist()
         parts = jnp.split(x, splits, axis=-1)
         out = []
-        for i, ((r, c), (ph, pw), p) in enumerate(zip(self.grids, self.pools, parts)):
+        for i, ((r, c), (ph, pw), p) in enumerate(zip(self.grids, self.pools, parts, strict=True)):
             conv = self.convs[str(i)]
             proj = self.projs[str(i)]
             b = p.shape[0]
@@ -195,17 +296,27 @@ class TactileEncoder(nnx.Module):
             raise ValueError(f"unknown tactile encoder_type: {encoder_type!r} (expected mlp|cnn|coord)")
         self.agg = SlotAggregator(embed, n, rngs=rngs)
 
-    def _select_norm(self, raw):  # [..., 256] -> [..., 112] in [0,1]
+    def select_and_normalize(self, raw):  # [..., 256] -> [..., 112] in [0,1]
         sel = jnp.take(raw, jnp.asarray(VALID_IDX, dtype=jnp.int32), axis=-1)
         return sel.astype(self.agg.norm.scale.value.dtype) / 255.0
 
     def __call__(self, cur):  # [B, 256] -> [B, N, embed]
-        return self.agg(self.per_region(self._select_norm(cur)))
+        return self.agg(self.per_region(self.select_and_normalize(cur)))
 
     def encode_pooled(self, raw_window):  # [B, T, 256] -> [B, T, embed] (mean over N slots)
         b, t = raw_window.shape[0], raw_window.shape[1]
         tok = self(raw_window.reshape(b * t, raw_window.shape[-1]))  # [B*T, N, embed]
         return tok.mean(axis=1).reshape(b, t, self.embed)
+
+
+class StateEncoder(nnx.Module):
+    """Encode normalized, padded robot state while preserving leading dimensions."""
+
+    def __init__(self, state_dim: int, embed: int, *, hidden: int = HIDDEN_DIM, rngs: nnx.Rngs):
+        self.net = _SmallMLP(state_dim, hidden, embed, rngs=rngs)
+
+    def __call__(self, state):  # [..., state_dim] -> [..., embed]
+        return self.net(state)
 
 
 class DreamHead(nnx.Module):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures as futures
 import dataclasses
+import json
 import logging
 from typing import Protocol
 
@@ -11,10 +12,22 @@ import jax
 import orbax.checkpoint as ocp
 import orbax.checkpoint.future as future
 
+import openpi.models.model as _model
 from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
 import openpi.training.data_loader as _data_loader
 import openpi.training.utils as training_utils
+
+_JEPA_MODEL_FIELDS = (
+    "use_tactile",
+    "use_tactile_dream",
+    "tactile_encoder_type",
+    "dream_horizon",
+    "tactile_dream_beta",
+    "dream_state",
+    "dream_vision",
+    "vision_horizon",
+)
 
 
 def initialize_checkpoint_dir(
@@ -67,6 +80,7 @@ def save_state(
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int,
+    model_config: _model.BaseModelConfig,
 ):
     def save_assets(directory: epath.Path):
         # Save the normalization stats.
@@ -74,6 +88,7 @@ def save_state(
         norm_stats = data_config.norm_stats
         if norm_stats is not None and data_config.asset_id is not None:
             _normalize.save(directory / data_config.asset_id, norm_stats)
+        save_jepa_model_config(directory, model_config)
 
     # Split params that can be used for inference into a separate item.
     with at.disable_typechecking():
@@ -112,6 +127,33 @@ def load_norm_stats(assets_dir: epath.Path | str, asset_id: str) -> dict[str, _n
     norm_stats = _normalize.load(norm_stats_dir)
     logging.info(f"Loaded norm stats from {norm_stats_dir}")
     return norm_stats
+
+
+def save_jepa_model_config(assets_dir: epath.Path | str, model_config: _model.BaseModelConfig) -> None:
+    """Persist graph-defining JEPA fields next to checkpoint normalization assets."""
+    values = {field: getattr(model_config, field) for field in _JEPA_MODEL_FIELDS if hasattr(model_config, field)}
+    if not values:
+        return
+    assets_dir = epath.Path(assets_dir)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    (assets_dir / "jepa_model_config.json").write_text(json.dumps(values, indent=2, sort_keys=True))
+
+
+def load_jepa_model_config(
+    assets_dir: epath.Path | str, model_config: _model.BaseModelConfig
+) -> _model.BaseModelConfig:
+    """Apply a checkpoint's graph-defining JEPA fields to a registry model config."""
+    path = epath.Path(assets_dir) / "jepa_model_config.json"
+    if not path.exists():
+        return model_config
+    values = json.loads(path.read_text())
+    unknown = sorted(set(values) - set(_JEPA_MODEL_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown JEPA model config fields in {path}: {unknown}")
+    unsupported = sorted(field for field in values if not hasattr(model_config, field))
+    if unsupported:
+        raise ValueError(f"checkpoint JEPA fields are unsupported by {type(model_config).__name__}: {unsupported}")
+    return dataclasses.replace(model_config, **values)
 
 
 class Callback(Protocol):

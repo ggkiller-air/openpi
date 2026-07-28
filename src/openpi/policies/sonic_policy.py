@@ -75,8 +75,12 @@ def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
     if np.issubdtype(image.dtype, np.floating):
         image = (255 * image).astype(np.uint8)
-    if image.shape[0] == 3:
+    if image.ndim == 3 and image.shape[0] == 3 and image.shape[-1] != 3:
         image = einops.rearrange(image, "c h w -> h w c")
+    elif image.ndim == 4 and image.shape[1] == 3 and image.shape[-1] != 3:
+        image = einops.rearrange(image, "t c h w -> t h w c")
+    if image.ndim not in (3, 4) or image.shape[-1] != 3:
+        raise ValueError(f"expected HWC/CHW or THWC/TCHW RGB image, got {image.shape}")
     return image
 
 
@@ -90,7 +94,7 @@ def assemble_state_46(state_43: np.ndarray, projected_gravity: np.ndarray, spans
     """
     spans = spans or DEFAULT_STATE_SPANS
     s = np.asarray(state_43, dtype=np.float32)
-    parts = [s[spans[g][0] : spans[g][1]] for g in STATE_GROUP_ORDER]
+    parts = [s[..., spans[g][0] : spans[g][1]] for g in STATE_GROUP_ORDER]
     parts.append(np.asarray(projected_gravity, dtype=np.float32))
     return np.concatenate(parts, axis=-1)
 
@@ -110,6 +114,9 @@ class SonicInputs(transforms.DataTransformFn):
     # Span of each joint group in the raw 43-d observation.state column, read from the
     # dataset's modality.json by SonicDataConfig. Only used on the training path.
     state_spans: dict | None = None
+    dream_state: bool = False
+    dream_vision: bool = False
+    vision_horizon: int = 4
 
     def __call__(self, data: dict) -> dict:
         if "state" in data:
@@ -119,19 +126,26 @@ class SonicInputs(transforms.DataTransformFn):
             # Training path: reassemble from the raw 43-d column + projected_gravity,
             # using spans derived from the dataset's modality.json (train == inference order).
             state = assemble_state_46(data["state_43"], data["projected_gravity"], self.state_spans)
+        if self.dream_state:
+            if state.ndim == 1:
+                state = state[None, :]
+            elif state.ndim != 2:
+                raise ValueError(f"state-JEPA expects [D] or [T, D], got {state.shape}")
 
         # Head stereo -> two of pi's three fixed image slots; the third is masked.
         # Slot names are opaque to the model (shared vision encoder); only train/inference
         # consistency matters. ego_view_left -> base_0_rgb, ego_view_right -> left_wrist_0_rgb.
         left_image = _parse_image(data["ego_view_left"])
         right_image = _parse_image(data["ego_view_right"])
+        left_current = left_image[0] if left_image.ndim == 4 else left_image
+        right_current = right_image[0] if right_image.ndim == 4 else right_image
 
         inputs = {
             "state": state,
             "image": {
-                "base_0_rgb": left_image,
-                "left_wrist_0_rgb": right_image,
-                "right_wrist_0_rgb": np.zeros_like(left_image),
+                "base_0_rgb": left_current,
+                "left_wrist_0_rgb": right_current,
+                "right_wrist_0_rgb": np.zeros_like(left_current),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
@@ -140,6 +154,20 @@ class SonicInputs(transforms.DataTransformFn):
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
             },
         }
+
+        # A sequence is supplied only by the training loader. Inference remains compatible
+        # with one current frame and does not need to fabricate future JEPA targets.
+        if self.dream_vision and left_image.ndim == 4 and right_image.ndim == 4:
+            expected = self.vision_horizon + 1
+            if left_image.shape[0] != expected or right_image.shape[0] != expected:
+                raise ValueError(
+                    f"vision-JEPA expects {expected} stereo frames, got {left_image.shape[0]} and "
+                    f"{right_image.shape[0]}"
+                )
+            inputs["future_images"] = {
+                "base_0_rgb": left_image[1:],
+                "left_wrist_0_rgb": right_image[1:],
+            }
 
         # Actions are only available during training. Concatenate the three SONIC action
         # columns into a single 78-d vector. ORDER MUST MATCH SonicOutputs / the bridge split.

@@ -4,11 +4,9 @@
 GR00T 数据集缺 lerobot v2.1 要求的 `meta/episodes_stats.jsonl`,先用脚本补上(幂等,已生成会自动跳过):
 ```bash
 uv run python scripts/make_sonic_episodes_stats.py \
-    --dataset-path /data/zihao/Isaac-GR00T/data/carry-bucket-stereo
+    --dataset-path /root/Projects/data/carry-bucket-stereo
 ```
 [scripts/make_sonic_episodes_stats.py](scripts/make_sonic_episodes_stats.py)
-
-
 
 ---
 
@@ -20,31 +18,44 @@ uv run python scripts/make_sonic_episodes_stats.py \
   
 ## 1.2 算归一化统计(每个数据集一次)
 ```bash
-export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
-uv run python scripts/compute_norm_stats.py --config-name=pi05_sonic
+export HF_LEROBOT_HOME=/root/Projects/data
+uv run python scripts/make_sonic_norm_stats.py \
+    --dataset-path /root/Projects/data/carry-bucket-stereo
 # 写到 assets/pi05_sonic/<repo_id>/norm_stats.json
 ```
 
 ## 1.3 launch training
-全量 fine-tune(所有权重都训,无 LoRA / 无冻结)。pi0.5 全量约需 ~70GB/卡 → 单张 80GB 即可放下;
-卡数由 `CUDA_VISIBLE_DEVICES` 决定,默认数据并行(每卡一份完整模型、分摊 batch)。
+默认是 full fine-tune，无 LoRA；启用 vision-JEPA 时 SigLIP image tower 会作为固定 teacher 冻结。
+下面用 GPU 2、3 做 2-way FSDP，卡数由 `CUDA_VISIBLE_DEVICES` 和 `--fsdp-devices` 共同决定。
 ```bash
 tmux new -s sonic_ft
 
-export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
-export CUDA_VISIBLE_DEVICES=0,1,2,3   # 想用几张就写几张(8×80GB 数据并行最快)
+export HF_LEROBOT_HOME=/root/Projects/data
+export CUDA_VISIBLE_DEVICES=2,3
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python scripts/train.py pi05_sonic \
-    --exp-name=tactile_coord \
+    --exp-name=tactile_jepa \
     --num-train-steps=20000 \
     --save-interval=10000 \
     --num-workers=16 \
     --model.use-tactile \
+    --model.use-tactile-dream \
+    --model.dream-state \
+    --model.dream-vision \
     --model.tactile-encoder-type coord \
-    --overwrite \
-# checkpoint 存到 checkpoints/pi05_sonic/sonic_v1/<step>
-# 仅当单卡显存不够时(<70GB)才需要把模型切片: 加 --fsdp-devices <卡数>
+    --lambda-tactile 0.5 \
+    --lambda-state 0.5 \
+    --lambda-vision 0.5 \
+    --fsdp-devices 2 \
+    --overwrite
+# checkpoint 存到 checkpoints/pi05_sonic/tactile_jepa/<step>
 ```
+
+触觉消融模式：不加开关是 `notac`；只加 `--model.use-tactile` 是 `input`；同时加
+`--model.use-tactile --model.use-tactile-dream` 是 tactile `dream`。`--model.dream-state` 和
+`--model.dream-vision` 只能在 `dream` 模式使用。推理只需要当前 state、双目图像和当前 tactile，
+不需要提供任何 future target。checkpoint 会在 `assets/jepa_model_config.json` 保存这些图结构开关，
+`serve_policy.py` 会自动恢复，不需要在推理时重复填写训练参数。
 
 ---
 
@@ -55,20 +66,20 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python scripts/train.py pi05_sonic \
 
 ## 2.1 进程A — openpi 策略服务(openpi venv)
 ```bash
-cd /data/zihao/openpi
-export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
+cd /root/Projects/openpi
+export HF_LEROBOT_HOME=/root/Projects/data
 
 uv run python scripts/serve_policy.py --port 8000 \
     policy:checkpoint \
     --policy.config pi05_sonic \
-    --policy.dir checkpoints/pi05_sonic/sonic_v1/<step>
+    --policy.dir checkpoints/pi05_sonic/tactile_jepa/<step>
 ```
 
 ## 2.2 进程B — 桥接服务(GR00T venv)
 - 桥接策略:[gr00t/policy/openpi_bridge_policy.py](../Isaac-GR00T/gr00t/policy/openpi_bridge_policy.py)
 - 启动器:[gr00t/eval/run_openpi_bridge_server.py](../Isaac-GR00T/gr00t/eval/run_openpi_bridge_server.py)
 ```bash
-cd /data/zihao/Isaac-GR00T
+cd /root/Projects/Isaac-GR00T
 python -m gr00t.eval.run_openpi_bridge_server \
     --port 5550 \
     --openpi-host 127.0.0.1 --openpi-port 8000
@@ -80,4 +91,3 @@ python gear_sonic/scripts/launch_inference.py \
     --prompt "carry the bucket" \
     --camera-host 192.168.123.164
 ```
-

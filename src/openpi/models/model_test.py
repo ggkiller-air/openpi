@@ -1,5 +1,6 @@
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import pytest
 
 from openpi.models import model as _model
@@ -7,6 +8,19 @@ from openpi.models import pi0_config
 from openpi.models import pi0_fast
 from openpi.shared import download
 from openpi.shared import nnx_utils
+
+
+def test_observation_accepts_state_jepa_window():
+    config = pi0_config.Pi0Config(
+        use_tactile=True,
+        use_tactile_dream=True,
+        dream_state=True,
+        dream_vision=True,
+    )
+    observation = config.fake_obs(batch_size=2)
+
+    assert observation.state.shape == (2, config.dream_horizon + 1, config.action_dim)
+    assert observation.state.dtype == jnp.float32
 
 
 def test_pi0_model():

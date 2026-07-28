@@ -82,3 +82,40 @@ def test_with_real_dataset():
 
     for _, actions in batches:
         assert actions.shape == (config.batch_size, config.model.action_horizon, config.model.action_dim)
+
+
+def test_jepa_delta_timestamps(monkeypatch):
+    captured = {}
+
+    class FakeMetadata:
+        fps = 50
+
+        def __init__(self, repo_id):
+            del repo_id
+
+    class FakeLeRobotDataset:
+        def __init__(self, repo_id, *, delta_timestamps):
+            captured["repo_id"] = repo_id
+            captured["delta_timestamps"] = delta_timestamps
+
+    monkeypatch.setattr(_data_loader.lerobot_dataset, "LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr(_data_loader.lerobot_dataset, "LeRobotDataset", FakeLeRobotDataset)
+    data_config = _config.DataConfig(
+        repo_id="local/test",
+        action_sequence_keys=("action",),
+        tactile_key="tactile",
+        tactile_horizon=5,
+        state_sequence_keys=("state", "gravity"),
+        state_horizon=5,
+        vision_sequence_keys=("left", "right"),
+        vision_horizon=3,
+    )
+
+    _data_loader.create_torch_dataset(data_config, action_horizon=4, model_config=pi0_config.Pi0Config())
+
+    assert captured["delta_timestamps"]["action"] == [0.0, 0.02, 0.04, 0.06]
+    assert captured["delta_timestamps"]["tactile"] == [0.0, 0.02, 0.04, 0.06, 0.08]
+    assert captured["delta_timestamps"]["state"] == [0.0, 0.02, 0.04, 0.06, 0.08]
+    assert captured["delta_timestamps"]["gravity"] == [0.0, 0.02, 0.04, 0.06, 0.08]
+    assert captured["delta_timestamps"]["left"] == [0.0, 0.02, 0.04]
+    assert captured["delta_timestamps"]["right"] == [0.0, 0.02, 0.04]

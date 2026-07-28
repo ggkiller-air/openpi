@@ -96,6 +96,11 @@ class DataConfig:
     # frames (current + future) for the dream auxiliary task. None disables tactile windowing.
     tactile_key: str | None = None
     tactile_horizon: int = 5
+    # Optional JEPA windows. Horizons include the current frame at index 0.
+    state_sequence_keys: Sequence[str] = ()
+    state_horizon: int = 1
+    vision_sequence_keys: Sequence[str] = ()
+    vision_horizon: int = 1
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -419,10 +424,19 @@ class SonicDataConfig(DataConfigFactory):
         # (e.g. at inference, where the bridge sends a pre-assembled 46-d state and spans are unused).
         state_spans = _read_sonic_state_spans(self.repo_id)
 
-        # Tactile (HTD): only wired when the model has use_tactile=True.
+        # JEPA windows are loaded only for active branches; input-only tactile reads one frame.
         use_tactile = getattr(model_config, "use_tactile", False)
+        use_tactile_dream = getattr(model_config, "use_tactile_dream", False)
+        dream_state = getattr(model_config, "dream_state", False)
+        dream_vision = getattr(model_config, "dream_vision", False)
         tactile_key = "observation.tactile_raw" if use_tactile else None
-        tactile_horizon = getattr(model_config, "dream_horizon", 4) + 1  # current + tau future frames
+        tactile_horizon = getattr(model_config, "dream_horizon", 4) + 1 if use_tactile_dream else 1
+        state_sequence_keys = ("observation.state", "observation.projected_gravity") if dream_state else ()
+        state_horizon = getattr(model_config, "dream_horizon", 4) + 1 if dream_state else 1
+        vision_sequence_keys = (
+            ("observation.images.ego_view_left", "observation.images.ego_view_right") if dream_vision else ()
+        )
+        vision_horizon = getattr(model_config, "vision_horizon", 4) + 1 if dream_vision else 1
 
         # Repack maps raw dataset columns -> the canonical keys consumed by SonicInputs.
         # (new_key: dataset_column). The action sequence columns are renamed to the short
@@ -444,7 +458,15 @@ class SonicDataConfig(DataConfigFactory):
         repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_map)])
 
         data_transforms = _transforms.Group(
-            inputs=[sonic_policy.SonicInputs(model_type=model_config.model_type, state_spans=state_spans)],
+            inputs=[
+                sonic_policy.SonicInputs(
+                    model_type=model_config.model_type,
+                    state_spans=state_spans,
+                    dream_state=dream_state,
+                    dream_vision=dream_vision,
+                    vision_horizon=getattr(model_config, "vision_horizon", 4),
+                )
+            ],
             outputs=[sonic_policy.SonicOutputs()],
         )
         # NOTE: no DeltaActions/AbsoluteActions — SONIC actions are absolute.
@@ -459,6 +481,10 @@ class SonicDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
             tactile_key=tactile_key,
             tactile_horizon=tactile_horizon,
+            state_sequence_keys=state_sequence_keys,
+            state_horizon=state_horizon,
+            vision_sequence_keys=vision_sequence_keys,
+            vision_horizon=vision_horizon,
         )
 
 
@@ -647,6 +673,8 @@ class TrainConfig:
     lambda_tactile: float = 0.5
     # EMA decay for the tactile teacher (updated each step: teacher <- d*teacher + (1-d)*student).
     tactile_ema_decay: float | None = 0.99
+    lambda_state: float = 0.5
+    lambda_vision: float = 0.5
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -663,13 +691,16 @@ class TrainConfig:
     @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
         """Get the filter for the trainable parameters."""
-        # Always exclude the tactile EMA teacher: it receives no gradients and is updated only
-        # by the EMA copy in train_step. Harmless when tactile is disabled (no such params exist).
-        return nnx.All(
+        filters = [
             nnx.Param,
             nnx.Not(self.freeze_filter),
             nnx.Not(nnx_utils.PathRegex(".*tactile_teacher.*")),
-        )
+            nnx.Not(nnx_utils.PathRegex(".*state_teacher.*")),
+        ]
+        # The shared image tower is the fixed vision-JEPA teacher and also encodes current images.
+        if getattr(self.model, "dream_vision", False):
+            filters.append(nnx.Not(nnx_utils.PathRegex(".*PaliGemma.*img.*")))
+        return nnx.All(*filters)
 
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
@@ -908,9 +939,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
     #
