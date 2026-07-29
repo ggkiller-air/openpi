@@ -226,7 +226,15 @@ class SonicInputs(transforms.DataTransformFn):
         if "tactile" in data:
             t = np.asarray(data["tactile"])
             if t.dtype != np.uint8:
-                raise ValueError(f"SONIC tactile must have dtype uint8, got {t.dtype}")
+                # LeRobot materializes Arrow list<uint8> values as int64 arrays. Preserve
+                # the wire-level uint8 contract while accepting that lossless loader cast.
+                if not np.issubdtype(t.dtype, np.integer) or (
+                    t.size and (t.min() < 0 or t.max() > 255)
+                ):
+                    raise ValueError(
+                        f"SONIC tactile must contain uint8-compatible integers, got {t.dtype}"
+                    )
+                t = t.astype(np.uint8)
             if t.ndim == 1:
                 t = t[None, :]
             if t.ndim != 2 or t.shape[-1] != 256:

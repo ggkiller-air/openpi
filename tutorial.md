@@ -33,25 +33,23 @@ uv run python scripts/make_sonic_norm_stats.py \
 Normalization is written once to
 `assets/pi05_sonic/carry-bucket-stereo/norm_stats.json` and is shared by all three configs.
 
-## Two-GPU smoke runs
+## Full training
 
-Check `nvidia-smi` first and use only idle GPUs. These two-step runs validate the real path;
-they are not full experiments.
+The tested four-A800 configuration uses global batch 64 with four-way FSDP. Each command
+runs the complete 30k-step experiment and writes a final checkpoint at step 29999.
 
 ```bash
 cd /root/Projects/openpi
 export HF_LEROBOT_HOME=/root/Projects/data
-export CUDA_VISIBLE_DEVICES=2,3
-export WANDB_MODE=disabled
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 COMMON_ARGS=(
-  --exp-name smoke
-  --num-train-steps 2
-  --save-interval 2
-  --batch-size 2
-  --num-workers 2
-  --fsdp-devices 2
-  --overwrite
+  --exp-name train
+  --num-train-steps 30000
+  --save-interval 1000
+  --batch-size 64
+  --num-workers 4
+  --fsdp-devices 4
 )
 
 uv run python scripts/train.py pi05_sonic_notactile "${COMMON_ARGS[@]}"
@@ -59,10 +57,9 @@ uv run python scripts/train.py pi05_sonic_htd "${COMMON_ARGS[@]}"
 uv run python scripts/train.py pi05_sonic_jepa "${COMMON_ARGS[@]}"
 ```
 
-Checkpoints are stored at `checkpoints/<config>/smoke/1` (the save directory uses the
-zero-based loop step). For a real run, change the experiment name, step/save counts, and global
-batch size. The checkpoint records its tactile graph switches in `assets/jepa_model_config.json`,
-so serving restores the correct mode.
+Checkpoints are stored under `checkpoints/<config>/train/`; the final checkpoint is
+`29999`. The checkpoint records its tactile graph switches in
+`assets/jepa_model_config.json`, so serving restores the correct mode.
 
 ## Model server and SONIC bridge
 
@@ -74,7 +71,7 @@ export HF_LEROBOT_HOME=/root/Projects/data
 uv run python scripts/serve_policy.py --port 8000 \
   policy:checkpoint \
   --policy.config pi05_sonic_jepa \
-  --policy.dir checkpoints/pi05_sonic_jepa/smoke/1
+  --policy.dir checkpoints/pi05_sonic_jepa/train/29999
 ```
 
 Install the lightweight websocket client once and expose the backend through the GR00T ZMQ

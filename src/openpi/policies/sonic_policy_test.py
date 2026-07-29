@@ -92,6 +92,25 @@ def test_sonic_tactile_checkpoint_rejects_missing_or_malformed_tactile():
         transform(data)
 
 
+def test_sonic_tactile_accepts_lossless_lerobot_integer_cast_only():
+    transform = sonic_policy.SonicInputs(
+        model_type=_model.ModelType.PI05,
+        requires_tactile=True,
+    )
+    data = sonic_policy.make_sonic_example()
+    data["tactile"] = np.arange(256, dtype=np.int64)
+    output = transform(data)
+    assert output["tactile"].dtype == np.uint8
+
+    data["tactile"][-1] = 256
+    with pytest.raises(ValueError, match="uint8-compatible"):
+        transform(data)
+
+    data["tactile"] = np.zeros(256, dtype=np.float32)
+    with pytest.raises(ValueError, match="uint8-compatible"):
+        transform(data)
+
+
 def test_sonic_outputs_reject_nonfinite_or_wrong_horizon():
     transform = sonic_policy.SonicOutputs()
     with pytest.raises(ValueError, match="shape"):
