@@ -465,6 +465,7 @@ class SonicDataConfig(DataConfigFactory):
                     dream_state=dream_state,
                     dream_vision=dream_vision,
                     vision_horizon=getattr(model_config, "vision_horizon", 4),
+                    requires_tactile=use_tactile,
                 )
             ],
             outputs=[sonic_policy.SonicOutputs()],

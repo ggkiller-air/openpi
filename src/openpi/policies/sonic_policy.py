@@ -30,6 +30,33 @@ SONIC_ACTION_DIM = MOTION_TOKEN_DIM + LEFT_HAND_DIM + RIGHT_HAND_DIM  # 78
 
 # 46-d state dim (8 groups of the registered unitree_g1_sonic modality config).
 SONIC_STATE_DIM = 46
+SONIC_ACTION_HORIZON = 40
+SONIC_PROTOCOL = "sonic_vla_v1"
+SONIC_VIDEO_KEYS = ("ego_view_left", "ego_view_right")
+
+
+def make_sonic_metadata(model_config) -> dict:
+    """Describe the websocket contract restored from a SONIC checkpoint."""
+    action_dim = int(model_config.action_dim)
+    action_horizon = int(model_config.action_horizon)
+    if action_dim != SONIC_ACTION_DIM or action_horizon != SONIC_ACTION_HORIZON:
+        raise ValueError(
+            "SONIC checkpoint must use action_dim=78 and action_horizon=40; "
+            f"got {action_dim} and {action_horizon}"
+        )
+    return {
+        "protocol": SONIC_PROTOCOL,
+        "state_dim": SONIC_STATE_DIM,
+        "action_horizon": SONIC_ACTION_HORIZON,
+        "action_dim": SONIC_ACTION_DIM,
+        "video_keys": list(SONIC_VIDEO_KEYS),
+        "requires_tactile": bool(getattr(model_config, "use_tactile", False)),
+        "action_layout": {
+            "motion_token": [0, MOTION_TOKEN_DIM],
+            "left_hand_joints": [MOTION_TOKEN_DIM, MOTION_TOKEN_DIM + LEFT_HAND_DIM],
+            "right_hand_joints": [MOTION_TOKEN_DIM + LEFT_HAND_DIM, SONIC_ACTION_DIM],
+        },
+    }
 
 # Order in which the joint groups are concatenated into the state vector. This MUST equal
 # the GR00T `unitree_g1_sonic` modality config's state `modality_keys` order (minus
@@ -117,6 +144,7 @@ class SonicInputs(transforms.DataTransformFn):
     dream_state: bool = False
     dream_vision: bool = False
     vision_horizon: int = 4
+    requires_tactile: bool = False
 
     def __call__(self, data: dict) -> dict:
         if "state" in data:
@@ -126,6 +154,12 @@ class SonicInputs(transforms.DataTransformFn):
             # Training path: reassemble from the raw 43-d column + projected_gravity,
             # using spans derived from the dataset's modality.json (train == inference order).
             state = assemble_state_46(data["state_43"], data["projected_gravity"], self.state_spans)
+        if state.shape[-1] != SONIC_STATE_DIM:
+            raise ValueError(
+                f"SONIC state must have width {SONIC_STATE_DIM}, got {state.shape}"
+            )
+        if not np.isfinite(state).all():
+            raise ValueError("SONIC state contains NaN or infinity")
         if self.dream_state:
             if state.ndim == 1:
                 state = state[None, :]
@@ -187,11 +221,17 @@ class SonicInputs(transforms.DataTransformFn):
         # Tactile passthrough (only present when use_tactile). Kept raw uint8 — NOT normalized;
         # the tactile encoder divides by 255 internally. Shape [T, 256]: training gives the
         # windowed [tactile_horizon, 256]; inference (bridge) gives a single [256] frame -> [1, 256].
+        if self.requires_tactile and "tactile" not in data:
+            raise ValueError("This SONIC checkpoint requires a current tactile frame")
         if "tactile" in data:
             t = np.asarray(data["tactile"])
+            if t.dtype != np.uint8:
+                raise ValueError(f"SONIC tactile must have dtype uint8, got {t.dtype}")
             if t.ndim == 1:
                 t = t[None, :]
-            inputs["tactile"] = t.astype(np.uint8)
+            if t.ndim != 2 or t.shape[-1] != 256:
+                raise ValueError(f"SONIC tactile must have shape [256] or [T, 256], got {t.shape}")
+            inputs["tactile"] = t
 
         return inputs
 
@@ -205,4 +245,12 @@ class SonicOutputs(transforms.DataTransformFn):
     """
 
     def __call__(self, data: dict) -> dict:
-        return {"actions": np.asarray(data["actions"][:, :SONIC_ACTION_DIM])}
+        actions = np.asarray(data["actions"][:, :SONIC_ACTION_DIM], dtype=np.float32)
+        if actions.shape != (SONIC_ACTION_HORIZON, SONIC_ACTION_DIM):
+            raise ValueError(
+                f"SONIC actions must have shape ({SONIC_ACTION_HORIZON}, "
+                f"{SONIC_ACTION_DIM}), got {actions.shape}"
+            )
+        if not np.isfinite(actions).all():
+            raise ValueError("SONIC actions contain NaN or infinity")
+        return {"actions": actions}

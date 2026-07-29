@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -64,6 +66,41 @@ def test_sonic_dream_inference_accepts_current_only_observation():
     assert output["state"].shape == (1, sonic_policy.SONIC_STATE_DIM)
     assert output["image"]["base_0_rgb"].ndim == 3
     assert "future_images" not in output
+
+
+def test_sonic_metadata_is_derived_from_restored_checkpoint_config():
+    metadata = sonic_policy.make_sonic_metadata(
+        SimpleNamespace(action_dim=78, action_horizon=40, use_tactile=True)
+    )
+
+    assert metadata["protocol"] == "sonic_vla_v1"
+    assert metadata["requires_tactile"] is True
+    assert metadata["video_keys"] == ["ego_view_left", "ego_view_right"]
+
+
+def test_sonic_tactile_checkpoint_rejects_missing_or_malformed_tactile():
+    transform = sonic_policy.SonicInputs(
+        model_type=_model.ModelType.PI05,
+        requires_tactile=True,
+    )
+    data = sonic_policy.make_sonic_example()
+    with pytest.raises(ValueError, match="requires a current tactile"):
+        transform(data)
+
+    data["tactile"] = np.zeros(255, dtype=np.uint8)
+    with pytest.raises(ValueError, match="shape"):
+        transform(data)
+
+
+def test_sonic_outputs_reject_nonfinite_or_wrong_horizon():
+    transform = sonic_policy.SonicOutputs()
+    with pytest.raises(ValueError, match="shape"):
+        transform({"actions": np.zeros((39, 78), dtype=np.float32)})
+
+    actions = np.zeros((40, 78), dtype=np.float32)
+    actions[0, 0] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        transform({"actions": actions})
 
 
 def test_sonic_inputs_fail_on_incomplete_future_window():

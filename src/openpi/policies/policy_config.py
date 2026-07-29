@@ -7,6 +7,7 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
+from openpi.policies import sonic_policy
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
@@ -75,6 +76,10 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    metadata = dict(train_config.policy_metadata or {})
+    if isinstance(train_config.data, _config.SonicDataConfig):
+        metadata.update(sonic_policy.make_sonic_metadata(checkpoint_model_config))
+
     return _policy.Policy(
         model,
         transforms=[
@@ -91,7 +96,7 @@ def create_trained_policy(
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,
-        metadata=train_config.policy_metadata,
+        metadata=metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
     )

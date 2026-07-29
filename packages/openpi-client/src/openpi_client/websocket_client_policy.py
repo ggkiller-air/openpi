@@ -1,9 +1,10 @@
+import inspect
 import logging
 import time
 from typing import Dict, Optional, Tuple
 
-from typing_extensions import override
 import websockets.sync.client
+from typing_extensions import override
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -34,9 +35,18 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         while True:
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
-                conn = websockets.sync.client.connect(
-                    self._uri, compression=None, max_size=None, additional_headers=headers
-                )
+                connect_kwargs = {
+                    "compression": None,
+                    "max_size": None,
+                    "additional_headers": headers,
+                }
+                # Robot policy websocket traffic is an explicit point-to-point
+                # connection and must not be routed through HTTP(S)_PROXY. The
+                # proxy keyword was added after the oldest supported websockets
+                # release, so enable it only when available.
+                if "proxy" in inspect.signature(websockets.sync.client.connect).parameters:
+                    connect_kwargs["proxy"] = None
+                conn = websockets.sync.client.connect(self._uri, **connect_kwargs)
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
             except ConnectionRefusedError:

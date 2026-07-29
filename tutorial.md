@@ -89,5 +89,6 @@ python -m gr00t.eval.run_openpi_bridge_server \
 ```bash
 python gear_sonic/scripts/launch_inference.py \
     --prompt "carry the bucket" \
-    --camera-host 192.168.123.164
+    --camera-host 192.168.123.164 \
+    --tactile-zmq-host 192.168.123.164
 ```
