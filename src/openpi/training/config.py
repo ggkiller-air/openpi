@@ -101,6 +101,8 @@ class DataConfig:
     state_horizon: int = 1
     vision_sequence_keys: Sequence[str] = ()
     vision_horizon: int = 1
+    # Exclude episode-tail samples if any requested action/auxiliary window would be padded.
+    drop_incomplete_sequences: bool = False
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -486,6 +488,7 @@ class SonicDataConfig(DataConfigFactory):
             state_horizon=state_horizon,
             vision_sequence_keys=vision_sequence_keys,
             vision_horizon=vision_horizon,
+            drop_incomplete_sequences=True,
         )
 
 
@@ -708,6 +711,51 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+SonicTactileMode: TypeAlias = Literal["notactile", "htd", "jepa"]
+
+
+def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainConfig:
+    """Build one fixed Table-1 SONIC tactile configuration."""
+
+    mode_flags = {
+        "notactile": {},
+        "htd": {"use_tactile": True, "use_tactile_dream": True},
+        "jepa": {
+            "use_tactile": True,
+            "use_tactile_dream": True,
+            "dream_state": True,
+            "dream_vision": True,
+        },
+    }
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=sonic_policy.SONIC_ACTION_DIM,
+            action_horizon=sonic_policy.SONIC_ACTION_HORIZON,
+            discrete_state_input=False,
+            **mode_flags[tactile_mode],
+        ),
+        data=SonicDataConfig(
+            repo_id="carry-bucket-stereo",
+            # All named modes use the same observation/action normalization statistics.
+            assets=AssetsConfig(assets_dir="./assets/pi05_sonic"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -919,30 +967,11 @@ _CONFIGS = [
     # Uses PartialCheckpointWeightLoader to reinit the resized action-head projections.
     # Before running: export HF_LEROBOT_HOME=/data/zihao/Isaac-GR00T/data
     #
-    TrainConfig(
-        name="pi05_sonic",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=sonic_policy.SONIC_ACTION_DIM,  # 78
-            action_horizon=40,
-            discrete_state_input=False,
-        ),
-        data=SonicDataConfig(
-            repo_id="carry-bucket-stereo",
-            base_config=DataConfig(prompt_from_task=True),
-        ),
-        batch_size=64,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=2_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        weight_loader=weight_loaders.PartialCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-    ),
+    # ``pi05_sonic`` remains the original no-tactile config for CLI/checkpoint compatibility.
+    make_sonic_train_config("pi05_sonic", "notactile"),
+    make_sonic_train_config("pi05_sonic_notactile", "notactile"),
+    make_sonic_train_config("pi05_sonic_htd", "htd"),
+    make_sonic_train_config("pi05_sonic_jepa", "jepa"),
     #
     # Fine-tuning Aloha configs.
     #

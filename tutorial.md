@@ -1,94 +1,108 @@
-# 0. 一次性准备
+# openpi pi0.5 SONIC tactile training
 
-## 0.1 补数据集缺失文件(每个新数据集跑一次)
-GR00T 数据集缺 lerobot v2.1 要求的 `meta/episodes_stats.jsonl`,先用脚本补上(幂等,已生成会自动跳过):
+Three fixed configs share the same code, dataset, action space, and normalization statistics:
+
+| Config | Current tactile | Future tactile | Future state | Future stereo |
+|---|---:|---:|---:|---:|
+| `pi05_sonic_notactile` | no | no | no | no |
+| `pi05_sonic_htd` | yes | yes | no | no |
+| `pi05_sonic_jepa` (UniVLaT/JEPA) | yes | yes | yes | yes |
+
+Future observations are stop-gradient auxiliary targets and never enter policy conditioning.
+The legacy, CLI-overridable `pi05_sonic` config remains an alias of the no-tactile baseline.
+Episode-tail samples are excluded whenever the 40-step action or auxiliary target window
+would cross the episode boundary; repeated padding is never trained as a real target.
+
+HTD is short for *Humanoid Transformer with Touch Dreaming* (arXiv:2604.13015). Here, HTD
+mode names its current-tactile fusion and future-tactile latent objective; it does not imply
+that pi0.5 reproduces the paper's complete policy and controller system.
+
+## Environment and data assets
+
 ```bash
+cd /root/Projects/openpi
+uv sync
+export HF_LEROBOT_HOME=/root/Projects/data
+
 uv run python scripts/make_sonic_episodes_stats.py \
-    --dataset-path /root/Projects/data/carry-bucket-stereo
-```
-[scripts/make_sonic_episodes_stats.py](scripts/make_sonic_episodes_stats.py)
-
----
-
-# 1. Training
-
-## 1.1 换数据集时需要修改 `pi05_sonic` 里的 `repo_id`;state 顺序会自动从该数据集的 `modality.json` 读取。
-
-  [src/openpi/training/config.py](src/openpi/training/config.py)
-  
-## 1.2 算归一化统计(每个数据集一次)
-```bash
-export HF_LEROBOT_HOME=/root/Projects/data
+  --dataset-path /root/Projects/data/carry-bucket-stereo
 uv run python scripts/make_sonic_norm_stats.py \
-    --dataset-path /root/Projects/data/carry-bucket-stereo
-# 写到 assets/pi05_sonic/<repo_id>/norm_stats.json
+  --dataset-path /root/Projects/data/carry-bucket-stereo
 ```
 
-## 1.3 launch training
-默认是 full fine-tune，无 LoRA；启用 vision-JEPA 时 SigLIP image tower 会作为固定 teacher 冻结。
-下面用 GPU 2、3 做 2-way FSDP，卡数由 `CUDA_VISIBLE_DEVICES` 和 `--fsdp-devices` 共同决定。
-```bash
-tmux new -s sonic_ft
+Normalization is written once to
+`assets/pi05_sonic/carry-bucket-stereo/norm_stats.json` and is shared by all three configs.
 
-export HF_LEROBOT_HOME=/root/Projects/data
-export CUDA_VISIBLE_DEVICES=2,3
+## Two-GPU smoke runs
 
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python scripts/train.py pi05_sonic \
-    --exp-name=tactile_jepa \
-    --num-train-steps=20000 \
-    --save-interval=10000 \
-    --num-workers=16 \
-    --model.use-tactile \
-    --model.use-tactile-dream \
-    --model.dream-state \
-    --model.dream-vision \
-    --model.tactile-encoder-type coord \
-    --lambda-tactile 0.5 \
-    --lambda-state 0.5 \
-    --lambda-vision 0.5 \
-    --fsdp-devices 2 \
-    --overwrite
-# checkpoint 存到 checkpoints/pi05_sonic/tactile_jepa/<step>
-```
+Check `nvidia-smi` first and use only idle GPUs. These two-step runs validate the real path;
+they are not full experiments.
 
-触觉消融模式：不加开关是 `notac`；只加 `--model.use-tactile` 是 `input`；同时加
-`--model.use-tactile --model.use-tactile-dream` 是 tactile `dream`。`--model.dream-state` 和
-`--model.dream-vision` 只能在 `dream` 模式使用。推理只需要当前 state、双目图像和当前 tactile，
-不需要提供任何 future target。checkpoint 会在 `assets/jepa_model_config.json` 保存这些图结构开关，
-`serve_policy.py` 会自动恢复，不需要在推理时重复填写训练参数。
-
----
-
-# 2. Inference(双进程桥接)
-
-> openpi 在自己的 venv 起 websocket 服务;GR00T 侧用桥接把它挂到 ZeroMQ PolicyServer:5550。
-> 旧的 sonic 客户端连 5550,**一行不改**。
-
-## 2.1 进程A — openpi 策略服务(openpi venv)
 ```bash
 cd /root/Projects/openpi
 export HF_LEROBOT_HOME=/root/Projects/data
+export CUDA_VISIBLE_DEVICES=2,3
+export WANDB_MODE=disabled
 
-uv run python scripts/serve_policy.py --port 8000 \
-    policy:checkpoint \
-    --policy.config pi05_sonic \
-    --policy.dir checkpoints/pi05_sonic/tactile_jepa/<step>
+COMMON_ARGS=(
+  --exp-name smoke
+  --num-train-steps 2
+  --save-interval 2
+  --batch-size 2
+  --num-workers 2
+  --fsdp-devices 2
+  --overwrite
+)
+
+uv run python scripts/train.py pi05_sonic_notactile "${COMMON_ARGS[@]}"
+uv run python scripts/train.py pi05_sonic_htd "${COMMON_ARGS[@]}"
+uv run python scripts/train.py pi05_sonic_jepa "${COMMON_ARGS[@]}"
 ```
 
-## 2.2 进程B — 桥接服务(GR00T venv)
-- 桥接策略:[gr00t/policy/openpi_bridge_policy.py](../Isaac-GR00T/gr00t/policy/openpi_bridge_policy.py)
-- 启动器:[gr00t/eval/run_openpi_bridge_server.py](../Isaac-GR00T/gr00t/eval/run_openpi_bridge_server.py)
+Checkpoints are stored at `checkpoints/<config>/smoke/1` (the save directory uses the
+zero-based loop step). For a real run, change the experiment name, step/save counts, and global
+batch size. The checkpoint records its tactile graph switches in `assets/jepa_model_config.json`,
+so serving restores the correct mode.
+
+## Model server and SONIC bridge
+
+Start the openpi websocket backend with the config matching the checkpoint:
+
+```bash
+cd /root/Projects/openpi
+export HF_LEROBOT_HOME=/root/Projects/data
+uv run python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint \
+  --policy.config pi05_sonic_jepa \
+  --policy.dir checkpoints/pi05_sonic_jepa/smoke/1
+```
+
+Install the lightweight websocket client once and expose the backend through the GR00T ZMQ
+interface expected by the shared controller:
+
 ```bash
 cd /root/Projects/Isaac-GR00T
-python -m gr00t.eval.run_openpi_bridge_server \
-    --port 5550 \
-    --openpi-host 127.0.0.1 --openpi-port 8000
+uv pip install --python .venv/bin/python -e /root/Projects/openpi/packages/openpi-client
+uv run --no-sync python -m gr00t.eval.run_openpi_bridge_server \
+  --openpi-host 127.0.0.1 --openpi-port 8000 --port 5550
 ```
 
-## 2.3 进程C — sonic 客户端(不改)
+Run the existing SONIC launcher without backend-specific changes:
+
 ```bash
+cd /root/Projects/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
-    --prompt "carry the bucket" \
-    --camera-host 192.168.123.164 \
-    --tactile-zmq-host 192.168.123.164
+  --policy-host 127.0.0.1 --policy-port 5550 \
+  --camera-host 192.168.123.164 --tactile-zmq-host 192.168.123.164 \
+  --prompt "carry the bucket"
 ```
+
+For `pi05_sonic_notactile`, omit `--tactile-zmq-host` and add `--no-use-tactile`.
+
+## `sonic_vla_v1` contract
+
+The websocket request contains `state: float32[46]`,
+`ego_view_left/right: uint8[H,W,3]`, `prompt: str`, and tactile `uint8[256]` only for HTD/JEPA.
+The response is finite `actions: float32[40,78]`, laid out as
+`motion_token[0:64] | left_hand[64:71] | right_hand[71:78]`. The bridge validates these
+dimensions and metadata before forwarding anything to the controller.

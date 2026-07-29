@@ -62,6 +62,39 @@ class TransformedDataset(Dataset[T_co]):
         return len(self._dataset)
 
 
+class EpisodeSafeDataset(Dataset[T_co]):
+    """Index a LeRobot dataset only where every requested temporal window is real."""
+
+    def __init__(self, dataset: Dataset[T_co]) -> None:
+        self._dataset = dataset
+        delta_indices = getattr(dataset, "delta_indices", None)
+        episode_data_index = getattr(dataset, "episode_data_index", None)
+        if not delta_indices or episode_data_index is None:
+            raise ValueError("EpisodeSafeDataset requires LeRobot delta and episode indices")
+        all_deltas = np.concatenate(
+            [np.asarray(values, dtype=np.int64) for values in delta_indices.values()]
+        )
+        minimum_delta = int(all_deltas.min())
+        maximum_delta = int(all_deltas.max())
+        valid = []
+        for start, end in zip(
+            episode_data_index["from"], episode_data_index["to"], strict=True
+        ):
+            first = int(start) + max(0, -minimum_delta)
+            stop = int(end) - max(0, maximum_delta)
+            if first < stop:
+                valid.append(np.arange(first, stop, dtype=np.int64))
+        if not valid:
+            raise ValueError("dataset has no complete temporal windows")
+        self.valid_indices = np.concatenate(valid)
+
+    def __getitem__(self, index: SupportsIndex) -> T_co:
+        return self._dataset[int(self.valid_indices[index.__index__()])]
+
+    def __len__(self) -> int:
+        return len(self.valid_indices)
+
+
 class IterableTransformedDataset(IterableDataset[T_co]):
     def __init__(
         self,
@@ -149,6 +182,8 @@ def create_torch_dataset(
     for key in data_config.vision_sequence_keys:
         delta_timestamps[key] = [t / dataset_meta.fps for t in range(data_config.vision_horizon)]
     dataset = lerobot_dataset.LeRobotDataset(data_config.repo_id, delta_timestamps=delta_timestamps)
+    if data_config.drop_incomplete_sequences:
+        dataset = EpisodeSafeDataset(dataset)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
