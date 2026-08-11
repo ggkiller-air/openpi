@@ -20,18 +20,18 @@ that pi0.5 reproduces the paper's complete policy and controller system.
 ## Environment and data assets
 
 ```bash
-cd /root/Projects/openpi
+cd /home/wzh/Projects/Uni_VLaT/openpi
 uv sync
-export HF_LEROBOT_HOME=/root/Projects/data
+export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
 
 uv run python scripts/make_sonic_episodes_stats.py \
-  --dataset-path /root/Projects/data/carry-bucket-stereo
+  --dataset-path /home/wzh/Projects/Uni_VLaT/data/desk_sweep
 uv run python scripts/make_sonic_norm_stats.py \
-  --dataset-path /root/Projects/data/carry-bucket-stereo
+  --dataset-path /home/wzh/Projects/Uni_VLaT/data/desk_sweep
 ```
 
 Normalization is written once to
-`assets/pi05_sonic/carry-bucket-stereo/norm_stats.json` and is shared by all three configs.
+`assets/pi05_sonic/desk_sweep/norm_stats.json` and is shared by all three configs.
 
 ## Full training
 
@@ -39,8 +39,8 @@ The tested four-A800 configuration uses global batch 64 with four-way FSDP. Each
 runs the complete 30k-step experiment and writes a final checkpoint at step 29999.
 
 ```bash
-cd /root/Projects/openpi
-export HF_LEROBOT_HOME=/root/Projects/data
+cd /home/wzh/Projects/Uni_VLaT/openpi
+export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 COMMON_ARGS=(
@@ -66,8 +66,8 @@ Checkpoints are stored under `checkpoints/<config>/train/`; the final checkpoint
 Start the openpi websocket backend with the config matching the checkpoint:
 
 ```bash
-cd /root/Projects/openpi
-export HF_LEROBOT_HOME=/root/Projects/data
+cd /home/wzh/Projects/Uni_VLaT/openpi
+export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
 uv run python scripts/serve_policy.py --port 8000 \
   policy:checkpoint \
   --policy.config pi05_sonic_jepa \
@@ -78,8 +78,8 @@ Install the lightweight websocket client once and expose the backend through the
 interface expected by the shared controller:
 
 ```bash
-cd /root/Projects/Isaac-GR00T
-uv pip install --python .venv/bin/python -e /root/Projects/openpi/packages/openpi-client
+cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
+uv pip install --python .venv/bin/python -e /home/wzh/Projects/Uni_VLaT/openpi/packages/openpi-client
 uv run --no-sync python -m gr00t.eval.run_openpi_bridge_server \
   --openpi-host 127.0.0.1 --openpi-port 8000 --port 5550
 ```
@@ -87,7 +87,7 @@ uv run --no-sync python -m gr00t.eval.run_openpi_bridge_server \
 Run the existing SONIC launcher without backend-specific changes:
 
 ```bash
-cd /root/Projects/GR00T-WholeBodyControl
+cd /home/wzh/Projects/Uni_VLaT/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
   --policy-host 127.0.0.1 --policy-port 5550 \
   --camera-host 192.168.123.164 --tactile-zmq-host 192.168.123.164 \
@@ -99,7 +99,7 @@ For `pi05_sonic_notactile`, omit `--tactile-zmq-host` and add `--no-use-tactile`
 ## `sonic_vla_v1` contract
 
 The websocket request contains `state: float32[46]`,
-`ego_view_left/right: uint8[H,W,3]`, `prompt: str`, and tactile `uint8[256]` only for HTD/JEPA.
+`ego_view_left/right: uint8[H,W,3]`, `prompt: str`, and tactile `uint8[768]` only for HTD/JEPA.
 The response is finite `actions: float32[40,78]`, laid out as
 `motion_token[0:64] | left_hand[64:71] | right_hand[71:78]`. The bridge validates these
 dimensions and metadata before forwarding anything to the controller.

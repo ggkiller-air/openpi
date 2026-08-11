@@ -92,9 +92,8 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
-    # Tactile (HTD): if set, the loader reads this column over a window of `tactile_horizon`
-    # frames (current + future) for the dream auxiliary task. None disables tactile windowing.
-    tactile_key: str | None = None
+    # Tactile (HTD): all device columns are read over the same future window.
+    tactile_keys: Sequence[str] = ()
     tactile_horizon: int = 5
     # Optional JEPA windows. Horizons include the current frame at index 0.
     state_sequence_keys: Sequence[str] = ()
@@ -431,7 +430,11 @@ class SonicDataConfig(DataConfigFactory):
         use_tactile_dream = getattr(model_config, "use_tactile_dream", False)
         dream_state = getattr(model_config, "dream_state", False)
         dream_vision = getattr(model_config, "dream_vision", False)
-        tactile_key = "observation.tactile_raw" if use_tactile else None
+        tactile_keys = (
+            "observation.tactile_vest",
+            "observation.tactile_left_arm",
+            "observation.tactile_right_arm",
+        ) if use_tactile else ()
         tactile_horizon = getattr(model_config, "dream_horizon", 4) + 1 if use_tactile_dream else 1
         state_sequence_keys = ("observation.state", "observation.projected_gravity") if dream_state else ()
         state_horizon = getattr(model_config, "dream_horizon", 4) + 1 if dream_state else 1
@@ -456,7 +459,11 @@ class SonicDataConfig(DataConfigFactory):
             "prompt": "prompt",
         }
         if use_tactile:
-            repack_map["tactile"] = "observation.tactile_raw"
+            repack_map["tactile"] = {
+                "vest": "observation.tactile_vest",
+                "left_arm": "observation.tactile_left_arm",
+                "right_arm": "observation.tactile_right_arm",
+            }
         repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_map)])
 
         data_transforms = _transforms.Group(
@@ -482,7 +489,7 @@ class SonicDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
-            tactile_key=tactile_key,
+            tactile_keys=tactile_keys,
             tactile_horizon=tactile_horizon,
             state_sequence_keys=state_sequence_keys,
             state_horizon=state_horizon,
@@ -737,7 +744,7 @@ def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainC
             **mode_flags[tactile_mode],
         ),
         data=SonicDataConfig(
-            repo_id="carry-bucket-stereo",
+            repo_id="desk_sweep",
             # All named modes use the same observation/action normalization statistics.
             assets=AssetsConfig(assets_dir="./assets/pi05_sonic"),
             base_config=DataConfig(prompt_from_task=True),

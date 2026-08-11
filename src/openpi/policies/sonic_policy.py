@@ -13,6 +13,7 @@ at an action horizon of 40. State is the 46-d vector defined by the registered
 
 """
 
+from collections.abc import Mapping
 import dataclasses
 
 import einops
@@ -33,6 +34,8 @@ SONIC_STATE_DIM = 46
 SONIC_ACTION_HORIZON = 40
 SONIC_PROTOCOL = "sonic_vla_v1"
 SONIC_VIDEO_KEYS = ("ego_view_left", "ego_view_right")
+SONIC_TACTILE_KEYS = ("vest", "left_arm", "right_arm")
+SONIC_TACTILE_DIM = 768
 
 
 def make_sonic_metadata(model_config) -> dict:
@@ -218,13 +221,19 @@ class SonicInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
-        # Tactile passthrough (only present when use_tactile). Kept raw uint8 — NOT normalized;
-        # the tactile encoder divides by 255 internally. Shape [T, 256]: training gives the
-        # windowed [tactile_horizon, 256]; inference (bridge) gives a single [256] frame -> [1, 256].
+        # Training supplies three windowed device streams; inference supplies their
+        # already-concatenated 768-wide current frame.
         if self.requires_tactile and "tactile" not in data:
             raise ValueError("This SONIC checkpoint requires a current tactile frame")
         if "tactile" in data:
-            t = np.asarray(data["tactile"])
+            source = data["tactile"]
+            if isinstance(source, Mapping):
+                missing = [key for key in SONIC_TACTILE_KEYS if key not in source]
+                if missing:
+                    raise ValueError(f"SONIC tactile is missing device streams: {missing}")
+                t = np.concatenate([np.asarray(source[key]) for key in SONIC_TACTILE_KEYS], axis=-1)
+            else:
+                t = np.asarray(source)
             if t.dtype != np.uint8:
                 # LeRobot materializes Arrow list<uint8> values as int64 arrays. Preserve
                 # the wire-level uint8 contract while accepting that lossless loader cast.
@@ -237,8 +246,11 @@ class SonicInputs(transforms.DataTransformFn):
                 t = t.astype(np.uint8)
             if t.ndim == 1:
                 t = t[None, :]
-            if t.ndim != 2 or t.shape[-1] != 256:
-                raise ValueError(f"SONIC tactile must have shape [256] or [T, 256], got {t.shape}")
+            if t.ndim != 2 or t.shape[-1] != SONIC_TACTILE_DIM:
+                raise ValueError(
+                    f"SONIC tactile must have shape [{SONIC_TACTILE_DIM}] or "
+                    f"[T, {SONIC_TACTILE_DIM}], got {t.shape}"
+                )
             inputs["tactile"] = t
 
         return inputs

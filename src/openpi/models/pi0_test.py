@@ -63,7 +63,7 @@ def test_jepa_mode_validation():
 def test_jepa_input_specs_match_current_and_future_contract():
     input_only = _pi0_config.Pi0Config(use_tactile=True)
     input_obs, _ = input_only.inputs_spec(batch_size=2)
-    assert input_obs.tactile.shape == (2, 1, 256)
+    assert input_obs.tactile.shape == (2, 1, 768)
     assert input_obs.state.shape == (2, input_only.action_dim)
     assert input_obs.future_images is None
 
@@ -76,7 +76,7 @@ def test_jepa_input_specs_match_current_and_future_contract():
         vision_horizon=2,
     )
     dream_obs, _ = dream.inputs_spec(batch_size=2)
-    assert dream_obs.tactile.shape == (2, 4, 256)
+    assert dream_obs.tactile.shape == (2, 4, 768)
     assert dream_obs.state.shape == (2, 4, dream.action_dim)
     assert all(image.shape == (2, 2, 224, 224, 3) for image in dream_obs.future_images.values())
 

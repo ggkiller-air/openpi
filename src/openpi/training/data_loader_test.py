@@ -1,10 +1,12 @@
+# ruff: noqa: I001
+
 import dataclasses
 
 import jax
 
 from openpi.models import pi0_config
-from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
+from openpi.training import config as _config
 
 
 def test_torch_data_loader():
@@ -103,7 +105,7 @@ def test_jepa_delta_timestamps(monkeypatch):
     data_config = _config.DataConfig(
         repo_id="local/test",
         action_sequence_keys=("action",),
-        tactile_key="tactile",
+        tactile_keys=("tactile",),
         tactile_horizon=5,
         state_sequence_keys=("state", "gravity"),
         state_horizon=5,

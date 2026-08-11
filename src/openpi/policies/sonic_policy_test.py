@@ -87,7 +87,7 @@ def test_sonic_tactile_checkpoint_rejects_missing_or_malformed_tactile():
     with pytest.raises(ValueError, match="requires a current tactile"):
         transform(data)
 
-    data["tactile"] = np.zeros(255, dtype=np.uint8)
+    data["tactile"] = np.zeros(767, dtype=np.uint8)
     with pytest.raises(ValueError, match="shape"):
         transform(data)
 
@@ -98,7 +98,7 @@ def test_sonic_tactile_accepts_lossless_lerobot_integer_cast_only():
         requires_tactile=True,
     )
     data = sonic_policy.make_sonic_example()
-    data["tactile"] = np.arange(256, dtype=np.int64)
+    data["tactile"] = np.arange(768, dtype=np.int64) % 256
     output = transform(data)
     assert output["tactile"].dtype == np.uint8
 
@@ -106,7 +106,7 @@ def test_sonic_tactile_accepts_lossless_lerobot_integer_cast_only():
     with pytest.raises(ValueError, match="uint8-compatible"):
         transform(data)
 
-    data["tactile"] = np.zeros(256, dtype=np.float32)
+    data["tactile"] = np.zeros(768, dtype=np.float32)
     with pytest.raises(ValueError, match="uint8-compatible"):
         transform(data)
 

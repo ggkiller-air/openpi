@@ -55,7 +55,7 @@ def test_build_sonic_norm_stats_reorders_state_and_concatenates_actions(tmp_path
             },
         },
     }
-    (meta / "stats.json").write_text(json.dumps(raw_stats))
+    (meta / "stats_gr00t.json").write_text(json.dumps({"statistics": raw_stats}))
     (meta / "modality.json").write_text(json.dumps(modality))
 
     result = make_sonic_norm_stats.build_sonic_norm_stats(tmp_path)

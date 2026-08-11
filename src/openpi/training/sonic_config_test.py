@@ -1,11 +1,13 @@
+# ruff: noqa: I001
+
 import pathlib
 
 import numpy as np
 import pytest
 import torch
 
-from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
+from openpi.training import config as _config
 
 
 @pytest.mark.parametrize(
@@ -29,12 +31,12 @@ def test_fixed_sonic_modes(name, expected_flags):
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("pi05_sonic_notactile", (None, 1, (), 1, (), 1)),
-        ("pi05_sonic_htd", ("observation.tactile_raw", 5, (), 1, (), 1)),
+        ("pi05_sonic_notactile", ((), 1, (), 1, (), 1)),
+        ("pi05_sonic_htd", (("observation.tactile_vest", "observation.tactile_left_arm", "observation.tactile_right_arm"), 5, (), 1, (), 1)),
         (
             "pi05_sonic_jepa",
             (
-                "observation.tactile_raw",
+                ("observation.tactile_vest", "observation.tactile_left_arm", "observation.tactile_right_arm"),
                 5,
                 ("observation.state", "observation.projected_gravity"),
                 5,
@@ -56,7 +58,7 @@ def test_fixed_sonic_modes_load_only_enabled_future_targets(name, expected, monk
     data = train_config.data.create(pathlib.Path(tmp_path), train_config.model)
 
     assert (
-        data.tactile_key,
+        data.tactile_keys,
         data.tactile_horizon,
         data.state_sequence_keys,
         data.state_horizon,

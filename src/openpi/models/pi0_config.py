@@ -113,7 +113,7 @@ class Pi0Config(_model.BaseModelConfig):
                 # Input-only uses one current frame; dream mode adds future targets.
                 tactile=(
                     jax.ShapeDtypeStruct(
-                        [batch_size, self.dream_horizon + 1 if self.use_tactile_dream else 1, 256], jnp.uint8
+                        [batch_size, self.dream_horizon + 1 if self.use_tactile_dream else 1, 768], jnp.uint8
                     )
                     if self.use_tactile
                     else None

@@ -1,6 +1,6 @@
 """Generate the `meta/episodes_stats.jsonl` that lerobot v2.1 requires.
 
-GR00T-format SONIC datasets ship an aggregate `meta/stats.json` but not the per-episode
+GR00T-format SONIC datasets ship `meta/stats_gr00t.json` but not the per-episode
 `meta/episodes_stats.jsonl` that lerobot 0.1.0 demands when loading a v2.1 dataset. Without
 it, lerobot falls back to the HF hub and fails (the dataset is local-only).
 
@@ -12,7 +12,7 @@ data, so these values only need to be schema-valid — they do not affect traini
 Idempotent: refuses to overwrite an existing file unless `--force`.
 
 Usage:
-    uv run python scripts/make_sonic_episodes_stats.py --dataset-path /data/zihao/Isaac-GR00T/data/carry-bucket-stereo
+    uv run python scripts/make_sonic_episodes_stats.py --dataset-path ../data/desk_sweep
 """
 
 import dataclasses
@@ -33,7 +33,7 @@ class Args:
 def main(args: Args) -> None:
     root = pathlib.Path(args.dataset_path)
     meta = root / "meta"
-    stats_path = meta / "stats.json"
+    stats_path = meta / "stats_gr00t.json"
     episodes_path = meta / "episodes.jsonl"
     out_path = meta / "episodes_stats.jsonl"
 
@@ -45,7 +45,8 @@ def main(args: Args) -> None:
         print(f"✓ {out_path} already exists, nothing to do (use --force to regenerate).")
         return
 
-    stats = json.loads(stats_path.read_text())
+    payload = json.loads(stats_path.read_text())
+    stats = payload["statistics"]
     episodes = [json.loads(line)["episode_index"] for line in episodes_path.read_text().splitlines() if line.strip()]
 
     # Add a count field (shape (1,)) to every feature so lerobot's weighted aggregation works.

@@ -24,7 +24,7 @@ class Args:
 
 def _feature_stats(raw_stats: dict, key: str, start: int | None = None, end: int | None = None) -> dict:
     if key not in raw_stats:
-        raise KeyError(f"{key!r} is missing from meta/stats.json")
+        raise KeyError(f"{key!r} is missing from meta/stats_gr00t.json")
     result = {}
     for field in ("mean", "std", "q01", "q99"):
         values = np.asarray(raw_stats[key][field], dtype=np.float32)
@@ -43,12 +43,12 @@ def _concatenate(parts: list[dict]) -> normalize.NormStats:
 
 def build_sonic_norm_stats(dataset_path: pathlib.Path) -> dict[str, normalize.NormStats]:
     meta = dataset_path / "meta"
-    stats_path = meta / "stats.json"
+    stats_path = meta / "stats_gr00t.json"
     modality_path = meta / "modality.json"
     if not stats_path.exists() or not modality_path.exists():
         raise FileNotFoundError(f"expected {stats_path} and {modality_path}")
 
-    raw_stats = json.loads(stats_path.read_text())
+    raw_stats = json.loads(stats_path.read_text())["statistics"]
     modality = json.loads(modality_path.read_text())
 
     state_parts = []

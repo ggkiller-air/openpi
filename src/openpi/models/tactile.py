@@ -5,7 +5,7 @@ The encoder turns a raw tactile packet into N conditioning tokens injected into 
 expert; a training-only dream head predicts the *future* tactile latent from the trunk.
 
 Three per-region encoders are provided via `encoder_type`: "mlp", "cnn", "coord" (CoordConv).
-All share the same I/O ([B,256] -> [B,N,embed]) and the slot aggregator / dream path.
+All share the same I/O ([B,768] -> [B,N,embed]) and the slot aggregator / dream path.
 
 Sensor layout (Unitree G1 SONIC skin suit) is copied verbatim from
 Isaac-GR00T/gr00t/data/tactile_layout.py (same suit, same carry-bucket data).
@@ -25,7 +25,7 @@ import numpy as np
 
 # ---- Sensor layout (SONIC), region-ordered, 0-based. From GR00T tactile_layout.py. ----
 # Region order: front_chest(48), back(40), left_arm(8), left_shoulder(4), right_arm(8), right_shoulder(4).
-VALID_IDX: tuple[int, ...] = (
+_VEST_VALID_IDX: tuple[int, ...] = (
     194,
     210,
     226,
@@ -139,10 +139,14 @@ VALID_IDX: tuple[int, ...] = (
     216,
     200,  # right_shoulder 4
 )
-REGION_SIZES: tuple[int, ...] = (48, 40, 8, 4, 8, 4)  # sum == 112
-REGION_GRIDS: tuple[tuple[int, int], ...] = ((6, 8), (5, 8), (2, 4), (1, 4), (2, 4), (1, 4))  # cnn/coord only
-RAW_DIM = 256
-NUM_VALID = 112
+_ARM_ORDER = tuple(range(128, 256)) + tuple(range(128))
+VALID_IDX = _VEST_VALID_IDX + tuple(256 + i for i in _ARM_ORDER) + tuple(512 + i for i in _ARM_ORDER)
+REGION_SIZES: tuple[int, ...] = (48, 40, 8, 4, 8, 4, 256, 256)
+REGION_GRIDS: tuple[tuple[int, int], ...] = (
+    (6, 8), (5, 8), (2, 4), (1, 4), (2, 4), (1, 4), (16, 16), (16, 16)
+)
+RAW_DIM = 768
+NUM_VALID = 624
 
 # Defaults (spec §5), embed adapted 1536 -> 1024 for pi0.5.
 EMBED_DIM = 1024
@@ -270,7 +274,7 @@ class SlotAggregator(nnx.Module):
 
 
 class TactileEncoder(nnx.Module):
-    """valid-select(112) -> /255 -> per-region encoder -> slot aggregator. Output [B, N, embed]."""
+    """valid-select(624) -> /255 -> per-region encoder -> slot aggregator. Output [B, N, embed]."""
 
     def __init__(
         self,
@@ -296,7 +300,7 @@ class TactileEncoder(nnx.Module):
             raise ValueError(f"unknown tactile encoder_type: {encoder_type!r} (expected mlp|cnn|coord)")
         self.agg = SlotAggregator(embed, n, rngs=rngs)
 
-    def select_and_normalize(self, raw):  # [..., 256] -> [..., 112] in [0,1]
+    def select_and_normalize(self, raw):  # [..., 768] -> [..., 624] in [0,1]
         sel = jnp.take(raw, jnp.asarray(VALID_IDX, dtype=jnp.int32), axis=-1)
         sel = sel.astype(self.agg.norm.scale.value.dtype)
         normalized = sel / 255.0
@@ -304,10 +308,10 @@ class TactileEncoder(nnx.Module):
         # 255/255 equal 0.99999994. Preserve the sensor range endpoints exactly.
         return jnp.where(sel == 255.0, jnp.ones_like(normalized), normalized)
 
-    def __call__(self, cur):  # [B, 256] -> [B, N, embed]
+    def __call__(self, cur):  # [B, 768] -> [B, N, embed]
         return self.agg(self.per_region(self.select_and_normalize(cur)))
 
-    def encode_pooled(self, raw_window):  # [B, T, 256] -> [B, T, embed] (mean over N slots)
+    def encode_pooled(self, raw_window):  # [B, T, 768] -> [B, T, embed] (mean over N slots)
         b, t = raw_window.shape[0], raw_window.shape[1]
         tok = self(raw_window.reshape(b * t, raw_window.shape[-1]))  # [B*T, N, embed]
         return tok.mean(axis=1).reshape(b, t, self.embed)
