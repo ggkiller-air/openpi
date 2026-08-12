@@ -35,10 +35,12 @@ Normalization is written once to
 
 ## Full training
 
-The tested four-A800 configuration uses global batch 64 with four-way FSDP. Each command
-runs 50k steps, or 3.2M samples, matching the completed Isaac-GR00T run (`50,000 x 64`).
-The official LeRobot loader uses TorchCodec in this environment; a 120-step HTD run showed
-no data starvation, so an additional decoded-video cache is not needed here.
+The tested four-A800 configuration uses global batch 64 with four-way FSDP. The practical
+fine-tuning budget is 20k steps (1.28M samples, about 14 dataset passes), which takes about
+16.5-17 hours for HTD including compilation and four checkpoints. This is a time-budgeted
+fine-tune, not a forced match to Isaac-GR00T's sample count. Resume from the last checkpoint
+only when validation or robot success is still improving. The official LeRobot loader uses
+TorchCodec in this environment; a 120-step HTD run showed no data starvation.
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/openpi
@@ -47,9 +49,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 COMMON_ARGS=(
   --exp-name train
-  --num-train-steps 50000
-  --save-interval 10000
-  --keep-period 10000
+  --num-train-steps 20000
+  --save-interval 5000
+  --keep-period 5000
   --batch-size 64
   --num-workers 4
   --fsdp-devices 4
@@ -61,7 +63,7 @@ uv run python scripts/train.py pi05_sonic_jepa "${COMMON_ARGS[@]}"
 ```
 
 Checkpoints are stored under `checkpoints/<config>/train/`; the final checkpoint is
-`49999`. The checkpoint records its tactile graph switches in
+`19999`. The checkpoint records its tactile graph switches in
 `assets/jepa_model_config.json`, so serving restores the correct mode.
 
 ## Model server and SONIC bridge
@@ -74,7 +76,7 @@ export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
 uv run python scripts/serve_policy.py --port 8000 \
   policy:checkpoint \
   --policy.config pi05_sonic_jepa \
-  --policy.dir checkpoints/pi05_sonic_jepa/train/49999
+  --policy.dir checkpoints/pi05_sonic_jepa/train/19999
 ```
 
 Install the lightweight websocket client once and expose the backend through the GR00T ZMQ
