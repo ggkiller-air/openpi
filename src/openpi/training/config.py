@@ -751,7 +751,7 @@ def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainC
         ),
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=2_000,
+            warmup_steps=2_500,
             peak_lr=5e-5,
             decay_steps=1_000_000,
             decay_lr=5e-5,
@@ -759,7 +759,9 @@ def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainC
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.PartialCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
+        num_train_steps=50_000,
+        save_interval=10_000,
+        keep_period=10_000,
     )
 
 

@@ -36,7 +36,9 @@ Normalization is written once to
 ## Full training
 
 The tested four-A800 configuration uses global batch 64 with four-way FSDP. Each command
-runs the complete 30k-step experiment and writes a final checkpoint at step 29999.
+runs 50k steps, or 3.2M samples, matching the completed Isaac-GR00T run (`50,000 x 64`).
+The official LeRobot loader uses TorchCodec in this environment; a 120-step HTD run showed
+no data starvation, so an additional decoded-video cache is not needed here.
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/openpi
@@ -45,8 +47,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 COMMON_ARGS=(
   --exp-name train
-  --num-train-steps 30000
-  --save-interval 1000
+  --num-train-steps 50000
+  --save-interval 10000
+  --keep-period 10000
   --batch-size 64
   --num-workers 4
   --fsdp-devices 4
@@ -58,7 +61,7 @@ uv run python scripts/train.py pi05_sonic_jepa "${COMMON_ARGS[@]}"
 ```
 
 Checkpoints are stored under `checkpoints/<config>/train/`; the final checkpoint is
-`29999`. The checkpoint records its tactile graph switches in
+`49999`. The checkpoint records its tactile graph switches in
 `assets/jepa_model_config.json`, so serving restores the correct mode.
 
 ## Model server and SONIC bridge
@@ -71,7 +74,7 @@ export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
 uv run python scripts/serve_policy.py --port 8000 \
   policy:checkpoint \
   --policy.config pi05_sonic_jepa \
-  --policy.dir checkpoints/pi05_sonic_jepa/train/29999
+  --policy.dir checkpoints/pi05_sonic_jepa/train/49999
 ```
 
 Install the lightweight websocket client once and expose the backend through the GR00T ZMQ
