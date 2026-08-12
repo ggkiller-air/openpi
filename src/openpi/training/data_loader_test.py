@@ -3,6 +3,7 @@
 import dataclasses
 
 import jax
+import numpy as np
 
 from openpi.models import pi0_config
 from openpi.training import data_loader as _data_loader
@@ -34,6 +35,27 @@ def test_torch_data_loader_infinite():
 
     for _ in range(10):
         _ = next(data_iter)
+
+
+def test_episode_split_is_deterministic_and_disjoint():
+    class FakeLeRobotDataset:
+        delta_indices = {"actions": np.arange(2)}
+        episode_data_index = {
+            "from": np.arange(0, 100, 10),
+            "to": np.arange(10, 110, 10),
+        }
+
+        def __getitem__(self, index):
+            return index
+
+    safe = _data_loader.EpisodeSafeDataset(FakeLeRobotDataset())
+    train = _data_loader.EpisodeSplitDataset(safe, split="train", val_ratio=0.2, seed=42)
+    val = _data_loader.EpisodeSplitDataset(safe, split="val", val_ratio=0.2, seed=42)
+
+    train_raw = {safe.valid_indices[index] for index in train.indices}
+    val_raw = {safe.valid_indices[index] for index in val.indices}
+    assert train_raw.isdisjoint(val_raw)
+    assert train_raw | val_raw == set(safe.valid_indices)
 
 
 def test_torch_data_loader_parallel():

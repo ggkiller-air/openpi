@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import json
 import logging
 import platform
 from typing import Any
@@ -240,6 +241,20 @@ def train_step(
     return new_state, info
 
 
+@at.typecheck
+def eval_action_mse(
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> at.Array:
+    params = state.ema_params if state.ema_params is not None else state.params
+    model = nnx.merge(state.model_def, params)
+    model.eval()
+    observation, actions = batch
+    predicted = model.sample_actions(rng, observation)
+    return jnp.mean(jnp.square(predicted - actions))
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
@@ -272,6 +287,15 @@ def main(config: _config.TrainConfig):
         shuffle=True,
     )
     data_iter = iter(data_loader)
+    val_loader = None
+    if config.eval_interval > 0:
+        val_loader = _data_loader.create_data_loader(
+            config,
+            sharding=data_sharding,
+            shuffle=False,
+            num_batches=config.val_batches,
+            split="val",
+        )
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
@@ -295,6 +319,21 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+    peval_action_mse = jax.jit(
+        eval_action_mse,
+        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        out_shardings=replicated_sharding,
+    )
+    best_manager = None
+    best_mse = float("inf")
+    best_dir = config.checkpoint_dir / "best_model"
+    if config.eval_interval > 0:
+        best_manager, _ = _checkpoints.initialize_checkpoint_dir(
+            best_dir, keep_period=None, overwrite=False, resume=True
+        )
+        metrics_path = best_dir / "metrics.json"
+        if metrics_path.exists():
+            best_mse = float(json.loads(metrics_path.read_text())["val_action_mse"])
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -318,11 +357,35 @@ def main(config: _config.TrainConfig):
             infos = []
         batch = next(data_iter)
 
+        if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+            assert val_loader is not None and best_manager is not None
+            val_iter = iter(val_loader)
+            values = []
+            for batch_index in range(config.val_batches):
+                val_batch = next(val_iter)
+                val_rng = jax.random.fold_in(train_rng, 10_000 + batch_index)
+                values.append(peval_action_mse(val_rng, train_state, val_batch))
+            val_mse = float(jax.device_get(jnp.mean(jnp.stack(values))))
+            logging.info("Step %d: val_action_mse=%.8f", step, val_mse)
+            wandb.log({"val/action_mse": val_mse}, step=step)
+            if val_mse < best_mse:
+                best_mse = val_mse
+                _checkpoints.save_state(best_manager, train_state, val_loader, step, config.model)
+                best_manager.wait_until_finished()
+                if jax.process_index() == 0:
+                    (best_dir / "metrics.json").write_text(
+                        json.dumps({"step": step, "val_action_mse": val_mse}, indent=2)
+                        + "\n"
+                    )
+                logging.info("Updated best_model at step %d", step)
+
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, config.model)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
+    if best_manager is not None:
+        best_manager.wait_until_finished()
 
 
 if __name__ == "__main__":

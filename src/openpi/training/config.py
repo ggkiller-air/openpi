@@ -661,6 +661,11 @@ class TrainConfig:
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
+    # Held-out episode validation for maintaining one best_model checkpoint.
+    eval_interval: int = 0
+    val_ratio: float = 0.0
+    val_batches: int = 8
+
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
     # If true, will resume training from the last checkpoint.
@@ -762,6 +767,9 @@ def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainC
         num_train_steps=20_000,
         save_interval=5_000,
         keep_period=5_000,
+        eval_interval=5_000,
+        val_ratio=0.05,
+        val_batches=8,
     )
 
 

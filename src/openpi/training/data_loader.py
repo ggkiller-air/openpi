@@ -77,22 +77,56 @@ class EpisodeSafeDataset(Dataset[T_co]):
         minimum_delta = int(all_deltas.min())
         maximum_delta = int(all_deltas.max())
         valid = []
-        for start, end in zip(
-            episode_data_index["from"], episode_data_index["to"], strict=True
+        valid_episode_ids = []
+        for episode_id, (start, end) in enumerate(
+            zip(episode_data_index["from"], episode_data_index["to"], strict=True)
         ):
             first = int(start) + max(0, -minimum_delta)
             stop = int(end) - max(0, maximum_delta)
             if first < stop:
-                valid.append(np.arange(first, stop, dtype=np.int64))
+                indices = np.arange(first, stop, dtype=np.int64)
+                valid.append(indices)
+                valid_episode_ids.append(np.full(len(indices), episode_id, dtype=np.int64))
         if not valid:
             raise ValueError("dataset has no complete temporal windows")
         self.valid_indices = np.concatenate(valid)
+        self.episode_ids = np.concatenate(valid_episode_ids)
 
     def __getitem__(self, index: SupportsIndex) -> T_co:
         return self._dataset[int(self.valid_indices[index.__index__()])]
 
     def __len__(self) -> int:
         return len(self.valid_indices)
+
+
+class EpisodeSplitDataset(Dataset[T_co]):
+    """Select a deterministic train or validation subset by whole episode."""
+
+    def __init__(
+        self,
+        dataset: EpisodeSafeDataset[T_co],
+        *,
+        split: Literal["train", "val"],
+        val_ratio: float,
+        seed: int,
+    ) -> None:
+        if not 0.0 < val_ratio < 1.0:
+            raise ValueError("val_ratio must be between 0 and 1")
+        episode_ids = np.unique(dataset.episode_ids)
+        if len(episode_ids) < 2:
+            raise ValueError("best-model validation requires at least two episodes")
+        shuffled = episode_ids.copy()
+        np.random.default_rng(seed).shuffle(shuffled)
+        val_count = min(len(shuffled) - 1, max(1, round(len(shuffled) * val_ratio)))
+        selected = set((shuffled[:val_count] if split == "val" else shuffled[val_count:]).tolist())
+        self._dataset = dataset
+        self.indices = np.flatnonzero(np.isin(dataset.episode_ids, list(selected)))
+
+    def __getitem__(self, index: SupportsIndex) -> T_co:
+        return self._dataset[int(self.indices[index.__index__()])]
+
+    def __len__(self) -> int:
+        return len(self.indices)
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -161,7 +195,13 @@ class FakeDataset(Dataset):
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    split: Literal["train", "val"] = "train",
+    val_ratio: float = 0.05,
+    seed: int = 0,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -184,6 +224,10 @@ def create_torch_dataset(
     dataset = lerobot_dataset.LeRobotDataset(data_config.repo_id, delta_timestamps=delta_timestamps)
     if data_config.drop_incomplete_sequences:
         dataset = EpisodeSafeDataset(dataset)
+        if val_ratio > 0:
+            dataset = EpisodeSplitDataset(
+                dataset, split=split, val_ratio=val_ratio, seed=seed
+            )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -268,6 +312,7 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
+    split: Literal["train", "val"] = "train",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -305,6 +350,8 @@ def create_data_loader(
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
         framework=framework,
+        split=split,
+        val_ratio=config.val_ratio,
     )
 
 
@@ -321,6 +368,8 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
+    split: Literal["train", "val"] = "train",
+    val_ratio: float = 0.05,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -339,7 +388,14 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    dataset = create_torch_dataset(
+        data_config,
+        action_horizon,
+        model_config,
+        split=split,
+        val_ratio=val_ratio,
+        seed=seed,
+    )
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
