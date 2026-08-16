@@ -26,6 +26,10 @@ def test_fixed_sonic_modes(name, expected_flags):
     assert model.action_dim == 78
     assert model.action_horizon == 40
     assert train_config.data.assets.assets_dir == "./assets/pi05_sonic"
+    if name == "pi05_sonic_jepa":
+        assert model.use_tactile_temporal
+        assert model.tactile_history_length == 4
+        assert model.use_delta_targets
 
 
 @pytest.mark.parametrize(
@@ -37,7 +41,7 @@ def test_fixed_sonic_modes(name, expected_flags):
             "pi05_sonic_jepa",
             (
                 ("observation.tactile_vest", "observation.tactile_left_arm", "observation.tactile_right_arm"),
-                5,
+                8,
                 ("observation.state", "observation.projected_gravity"),
                 5,
                 ("observation.images.ego_view_left", "observation.images.ego_view_right"),

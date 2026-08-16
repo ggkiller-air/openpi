@@ -317,6 +317,36 @@ class TactileEncoder(nnx.Module):
         return tok.mean(axis=1).reshape(b, t, self.embed)
 
 
+class TactileTemporalEncoder(nnx.Module):
+    """Fuse per-slot tactile history and return current-time slot tokens."""
+
+    def __init__(self, embed: int, history: int, *, num_heads: int = NUM_HEADS, rngs: nnx.Rngs):
+        if history < 2:
+            raise ValueError("tactile history must contain at least two frames")
+        if embed % num_heads:
+            raise ValueError("tactile embed width must be divisible by the attention head count")
+        self.history = history
+        self.time_embedding = nnx.Param(jax.random.normal(rngs.params(), (history, embed)) * 0.02)
+        self.attn = nnx.MultiHeadAttention(
+            num_heads=num_heads, in_features=embed, decode=False, rngs=rngs
+        )
+        self.ff1 = nnx.Linear(embed, 2 * embed, rngs=rngs)
+        self.ff2 = nnx.Linear(2 * embed, embed, rngs=rngs)
+        self.attn_norm = nnx.LayerNorm(embed, rngs=rngs)
+        self.output_norm = nnx.LayerNorm(embed, rngs=rngs)
+
+    def __call__(self, tokens):  # [B,H,N,D] -> [B,N,D]
+        if tokens.ndim != 4 or tokens.shape[1] != self.history:
+            raise ValueError(f"expected tactile tokens [B,{self.history},N,D], got {tokens.shape}")
+        batch, history, slots, width = tokens.shape
+        sequence = tokens.transpose(0, 2, 1, 3).reshape(batch * slots, history, width)
+        sequence = sequence + self.time_embedding.value[None].astype(sequence.dtype)
+        attended = self.attn(sequence, sequence, sequence, deterministic=True)
+        sequence = self.attn_norm(sequence + attended)
+        sequence = self.output_norm(sequence + self.ff2(nnx.gelu(self.ff1(sequence))))
+        return sequence[:, -1].reshape(batch, slots, width)
+
+
 class StateEncoder(nnx.Module):
     """Encode normalized, padded robot state while preserving leading dimensions."""
 
@@ -344,8 +374,17 @@ def dream_loss(pred, target, beta: float = 1.0):  # [B, tau, embed] each; target
     p = pred.astype(jnp.float32)
     t = target.astype(jnp.float32)
     direction = 1.0 - _cosine_similarity(p, t, axis=-1)
+    direction = direction * (jnp.linalg.norm(t, axis=-1) > 1e-6).astype(direction.dtype)
     magnitude = _smooth_l1(jnp.linalg.norm(p, axis=-1), jnp.linalg.norm(t, axis=-1))
     return jnp.mean(direction + beta * magnitude)
+
+
+def latent_prediction_target(future, current, *, use_delta: bool):
+    if not use_delta:
+        return future
+    if current.ndim == future.ndim - 1:
+        current = current[:, None]
+    return future - current
 
 
 def _cosine_similarity(a, b, axis=-1, eps=1e-8):

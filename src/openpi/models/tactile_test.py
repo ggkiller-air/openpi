@@ -51,3 +51,17 @@ def test_dream_loss_is_finite_and_zero_for_identical_nonzero_latents():
     loss = tactile.dream_loss(latent, latent)
     assert bool(jnp.isfinite(loss))
     np.testing.assert_allclose(np.asarray(loss), 0.0, atol=1e-6)
+
+
+def test_delta_target_and_temporal_encoder():
+    future = jnp.arange(2 * 4 * 16, dtype=jnp.float32).reshape(2, 4, 16)
+    current = jnp.ones((2, 16), dtype=jnp.float32)
+    np.testing.assert_array_equal(
+        np.asarray(tactile.latent_prediction_target(future, current, use_delta=True)),
+        np.asarray(future - current[:, None]),
+    )
+    encoder = tactile.TactileTemporalEncoder(16, 4, num_heads=4, rngs=nnx.Rngs(0))
+    output = encoder(jnp.ones((2, 4, 3, 16), dtype=jnp.float32))
+    assert output.shape == (2, 3, 16)
+    zero = jnp.zeros((2, 4, 16), dtype=jnp.float32)
+    np.testing.assert_allclose(np.asarray(tactile.dream_loss(zero, zero)), 0.0)

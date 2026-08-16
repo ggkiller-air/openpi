@@ -215,8 +215,16 @@ def create_torch_dataset(
         key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
     }
     # Tactile needs a short future window [0..tactile_horizon-1] for the HTD dream targets.
+    tactile_history = (
+        getattr(model_config, "tactile_history_length", 4)
+        if getattr(model_config, "use_tactile_temporal", False)
+        else 1
+    )
     for key in data_config.tactile_keys:
-        delta_timestamps[key] = [t / dataset_meta.fps for t in range(data_config.tactile_horizon)]
+        delta_timestamps[key] = [
+            t / dataset_meta.fps
+            for t in range(1 - tactile_history, data_config.tactile_horizon + 1 - tactile_history)
+        ]
     for key in data_config.state_sequence_keys:
         delta_timestamps[key] = [t / dataset_meta.fps for t in range(data_config.state_horizon)]
     for key in data_config.vision_sequence_keys:

@@ -31,6 +31,22 @@ import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
 
+COMPARISON_GROUP = "sonic-htd-model-comparison"
+
+
+def comparison_metrics(metrics: dict[str, Any], step: int, learning_rate: float) -> dict[str, Any]:
+    """Return the common W&B schema used across all five VLA trainers."""
+    aliases = {
+        "comparison/step": step,
+        "comparison/loss": metrics.get("loss"),
+        "comparison/action_loss": metrics.get("action_loss"),
+        "comparison/tactile_loss": metrics.get("tactile_loss"),
+        "comparison/vision_loss": metrics.get("vision_jepa_loss"),
+        "comparison/lr": learning_rate,
+    }
+    return {key: value for key, value in aliases.items() if value is not None}
+
+
 def init_logging():
     """Custom logging format for better readability."""
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
@@ -60,14 +76,23 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
     if resuming:
         run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
-        wandb.init(id=run_id, resume="must", project=config.project_name)
+        wandb.init(
+            id=run_id,
+            resume="must",
+            project=config.project_name,
+            group=COMPARISON_GROUP,
+            job_type="comparison-training",
+        )
     else:
         wandb.init(
-            name=config.exp_name,
+            name=f"OpenPI / {config.exp_name}",
             config=dataclasses.asdict(config),
             project=config.project_name,
+            group=COMPARISON_GROUP,
+            job_type="comparison-training",
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+    wandb.define_metric("comparison/*", step_metric="comparison/step")
 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
@@ -312,6 +337,10 @@ def main(config: _config.TrainConfig):
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+    else:
+        logging.info("Saving step-0 smoke checkpoint before training")
+        _checkpoints.save_state(checkpoint_manager, train_state, data_loader, 0, config.model)
+        checkpoint_manager.wait_until_finished()
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
@@ -353,6 +382,9 @@ def main(config: _config.TrainConfig):
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
+            reduced_info.update(
+                comparison_metrics(reduced_info, step, config.lr_schedule.create()(step))
+            )
             wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)

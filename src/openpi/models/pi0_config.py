@@ -46,6 +46,9 @@ class Pi0Config(_model.BaseModelConfig):
     dream_state: bool = False
     dream_vision: bool = False
     vision_horizon: int = 4
+    use_tactile_temporal: bool = False
+    tactile_history_length: int = 4
+    use_delta_targets: bool = False
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -71,6 +74,12 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("vision_horizon must be positive")
         if self.tactile_dream_beta < 0:
             raise ValueError("tactile_dream_beta must be non-negative")
+        if self.use_tactile_temporal and not self.use_tactile:
+            raise ValueError("use_tactile_temporal requires use_tactile=True")
+        if self.use_tactile_temporal and self.tactile_history_length < 2:
+            raise ValueError("temporal tactile encoding requires at least two history frames")
+        if self.use_delta_targets and not self.use_tactile_dream:
+            raise ValueError("use_delta_targets requires use_tactile_dream=True")
 
     @property
     @override
@@ -113,7 +122,13 @@ class Pi0Config(_model.BaseModelConfig):
                 # Input-only uses one current frame; dream mode adds future targets.
                 tactile=(
                     jax.ShapeDtypeStruct(
-                        [batch_size, self.dream_horizon + 1 if self.use_tactile_dream else 1, 768], jnp.uint8
+                        [
+                            batch_size,
+                            (self.tactile_history_length if self.use_tactile_temporal else 1)
+                            + (self.dream_horizon if self.use_tactile_dream else 0),
+                            768,
+                        ],
+                        jnp.uint8,
                     )
                     if self.use_tactile
                     else None

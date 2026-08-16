@@ -435,7 +435,12 @@ class SonicDataConfig(DataConfigFactory):
             "observation.tactile_left_arm",
             "observation.tactile_right_arm",
         ) if use_tactile else ()
-        tactile_horizon = getattr(model_config, "dream_horizon", 4) + 1 if use_tactile_dream else 1
+        tactile_history = (
+            getattr(model_config, "tactile_history_length", 4)
+            if getattr(model_config, "use_tactile_temporal", False)
+            else 1
+        )
+        tactile_horizon = tactile_history + (getattr(model_config, "dream_horizon", 4) if use_tactile_dream else 0)
         state_sequence_keys = ("observation.state", "observation.projected_gravity") if dream_state else ()
         state_horizon = getattr(model_config, "dream_horizon", 4) + 1 if dream_state else 1
         vision_sequence_keys = (
@@ -737,6 +742,9 @@ def make_sonic_train_config(name: str, tactile_mode: SonicTactileMode) -> TrainC
             "use_tactile_dream": True,
             "dream_state": True,
             "dream_vision": True,
+            "use_tactile_temporal": True,
+            "tactile_history_length": 4,
+            "use_delta_targets": True,
         },
     }
     return TrainConfig(

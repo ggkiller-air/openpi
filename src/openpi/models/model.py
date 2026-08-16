@@ -107,8 +107,7 @@ class Observation(Generic[ArrayT]):
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     # Raw tactile packet over a short time window, [*b, t, raw_dim] (uint8 in [0,255]).
-    # Index 0 along the time axis is the current frame (conditioning); 1.. are future frames
-    # (dream targets, training only). NOT normalized by dataset stats — the tactile encoder
+    # Temporal modes store past..current first, followed by future target frames. NOT normalized by dataset stats — the tactile encoder
     # divides by 255 internally. None when tactile is disabled.
     tactile: at.Array | None = None
 

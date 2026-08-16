@@ -114,11 +114,18 @@ class Pi0(_model.BaseModel):
         self.use_tactile_dream = config.use_tactile_dream
         self.dream_state = config.dream_state
         self.dream_vision = config.dream_vision
+        self.use_tactile_temporal = config.use_tactile_temporal
+        self.tactile_history_length = config.tactile_history_length if config.use_tactile_temporal else 1
+        self.use_delta_targets = config.use_delta_targets
         if config.use_tactile:
             embed = action_expert_config.width
             self.tactile_encoder = _tactile.TactileEncoder(
                 encoder_type=config.tactile_encoder_type, embed=embed, rngs=rngs
             )
+            if self.use_tactile_temporal:
+                self.tactile_temporal_encoder = _tactile.TactileTemporalEncoder(
+                    embed, self.tactile_history_length, rngs=rngs
+                )
         if config.use_tactile_dream:
             self.dream_horizon = config.dream_horizon
             self.tactile_dream_beta = config.tactile_dream_beta
@@ -153,18 +160,29 @@ class Pi0(_model.BaseModel):
     def _current_state(state):
         return state[:, 0] if state.ndim == 3 else state
 
-    @staticmethod
-    def _current_tactile(tactile, batch_size: int):
+    def _tactile_features(self, tactile, batch_size: int):
         if tactile is None:
-            return jnp.zeros((batch_size, _tactile.RAW_DIM), dtype=jnp.uint8)
-        return tactile[:, 0] if tactile.ndim == 3 else tactile
+            tactile = jnp.zeros((batch_size, 1, _tactile.RAW_DIM), dtype=jnp.uint8)
+        elif tactile.ndim == 2:
+            tactile = tactile[:, None]
+        history = tactile[:, : self.tactile_history_length]
+        if history.shape[1] < self.tactile_history_length:
+            padding = jnp.repeat(history[:, :1], self.tactile_history_length - history.shape[1], axis=1)
+            history = jnp.concatenate([padding, history], axis=1)
+        if not self.use_tactile_temporal:
+            return self.tactile_encoder(history[:, -1])
+        batch, steps, width = history.shape
+        tokens = self.tactile_encoder(history.reshape(batch * steps, width))
+        return self.tactile_temporal_encoder(
+            tokens.reshape(batch, steps, self.tactile_encoder.n, self.tactile_encoder.embed)
+        )
 
     def _validate_jepa_targets(self, observation: _model.Observation):
         if self.use_tactile and observation.tactile is None:
             raise ValueError("tactile fusion training requires a current tactile frame")
         if not self.use_tactile_dream:
             return
-        expected_tactile = self.dream_horizon + 1
+        expected_tactile = self.tactile_history_length + self.dream_horizon
         if observation.tactile.ndim != 3 or observation.tactile.shape[1] != expected_tactile:
             raise ValueError(
                 f"tactile dream requires [B, {expected_tactile}, {_tactile.RAW_DIM}], got {observation.tactile.shape}"
@@ -278,8 +296,9 @@ class Pi0(_model.BaseModel):
         # tokens (a later block) can attend to them as context. The action-decode slice stays
         # the last `action_horizon` tokens, so action decoding is unchanged.
         if self.use_tactile:
-            tactile = self._current_tactile(obs.tactile, action_expert_tokens.shape[0])
-            tactile_tokens = self.tactile_encoder(tactile).astype(action_expert_tokens.dtype)
+            tactile_tokens = self._tactile_features(
+                obs.tactile, action_expert_tokens.shape[0]
+            ).astype(action_expert_tokens.dtype)
             n_tac = tactile_tokens.shape[1]
             tokens.append(tactile_tokens)
             input_mask.append(jnp.ones((tactile_tokens.shape[0], n_tac), dtype=jnp.bool_))
@@ -333,8 +352,15 @@ class Pi0(_model.BaseModel):
         tac_start = int(not self.pi05) + int(self.dream_state)
         trunk = suffix_out[:, tac_start : tac_start + n_tac].mean(axis=1)  # [b, width]
         z_hat = self.dream_head(trunk)  # [b, tau, embed]
-        future = observation.tactile[:, 1 : 1 + self.dream_horizon]  # [b, tau, 256]
+        current_index = self.tactile_history_length - 1
+        future = observation.tactile[:, current_index + 1 : current_index + 1 + self.dream_horizon]
         z_star = jax.lax.stop_gradient(self.tactile_teacher.encode_pooled(future))  # [b, tau, embed]
+        current_tactile = jax.lax.stop_gradient(
+            self.tactile_teacher.encode_pooled(observation.tactile[:, current_index])
+        )
+        z_star = _tactile.latent_prediction_target(
+            z_star, current_tactile, use_delta=self.use_delta_targets
+        )
         aux = {
             "tactile_loss": _tactile.dream_loss(z_hat, z_star, beta=self.tactile_dream_beta),
             "state_jepa_loss": jnp.asarray(0.0, dtype=jnp.float32),
@@ -345,11 +371,26 @@ class Pi0(_model.BaseModel):
             state_hat = self.state_dream_head(trunk)
             future_state = observation.state[:, 1 : 1 + self.dream_horizon]
             state_target = jax.lax.stop_gradient(self.state_teacher(future_state))
+            current_state = jax.lax.stop_gradient(self.state_teacher(observation.state[:, 0]))
+            state_target = _tactile.latent_prediction_target(
+                state_target, current_state, use_delta=self.use_delta_targets
+            )
             aux["state_jepa_loss"] = _tactile.dream_loss(state_hat, state_target, beta=self.tactile_dream_beta)
 
         if self.dream_vision:
             vision_hat = self.vision_dream_head(trunk)
             vision_target = jax.lax.stop_gradient(self._future_vision_targets(observation.future_images))
+            current_vision = jax.lax.stop_gradient(
+                pool_future_vision_embeddings(
+                    [
+                        self.PaliGemma.img(observation.images[name], train=False)[0][:, None]
+                        for name in observation.future_images
+                    ]
+                )[:, 0]
+            )
+            vision_target = _tactile.latent_prediction_target(
+                vision_target, current_vision, use_delta=self.use_delta_targets
+            )
             aux["vision_jepa_loss"] = _tactile.dream_loss(vision_hat, vision_target, beta=self.tactile_dream_beta)
 
         return chunked_loss, aux
