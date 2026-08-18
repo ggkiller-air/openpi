@@ -187,8 +187,9 @@ class Pi0(_model.BaseModel):
             raise ValueError(
                 f"tactile dream requires [B, {expected_tactile}, {_tactile.RAW_DIM}], got {observation.tactile.shape}"
             )
-        if self.dream_state and (observation.state.ndim != 3 or observation.state.shape[1] != expected_tactile):
-            raise ValueError(f"state-JEPA requires [B, {expected_tactile}, D], got {observation.state.shape}")
+        expected_state = self.dream_horizon + 1
+        if self.dream_state and (observation.state.ndim != 3 or observation.state.shape[1] != expected_state):
+            raise ValueError(f"state-JEPA requires [B, {expected_state}, D], got {observation.state.shape}")
         if self.dream_vision:
             if not observation.future_images:
                 raise ValueError("vision-JEPA requires future_images during training")

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
@@ -79,6 +81,25 @@ def test_jepa_input_specs_match_current_and_future_contract():
     assert dream_obs.tactile.shape == (2, 4, 768)
     assert dream_obs.state.shape == (2, 4, dream.action_dim)
     assert all(image.shape == (2, 2, 224, 224, 3) for image in dream_obs.future_images.values())
+
+
+def test_jepa_target_validation_accepts_state_prediction_window():
+    model = SimpleNamespace(
+        use_tactile=True,
+        use_tactile_dream=True,
+        dream_state=True,
+        dream_vision=False,
+        tactile_history_length=4,
+        dream_horizon=4,
+    )
+    observation = SimpleNamespace(
+        tactile=jnp.zeros((2, 8, 768), dtype=jnp.uint8),
+        state=jnp.zeros((2, 5, 78), dtype=jnp.float32),
+    )
+
+    assert observation.tactile.shape == (2, 8, 768)
+    assert observation.state.shape == (2, 5, 78)
+    pi0.Pi0._validate_jepa_targets(model, observation)  # noqa: SLF001
 
 
 def test_future_vision_pooling_preserves_time_and_averages_views_and_patches():
