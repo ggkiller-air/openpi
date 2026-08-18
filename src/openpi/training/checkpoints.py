@@ -29,6 +29,9 @@ _JEPA_MODEL_FIELDS = (
     "dream_state",
     "dream_vision",
     "vision_horizon",
+    "use_tactile_temporal",
+    "tactile_history_length",
+    "use_delta_targets",
 )
 
 

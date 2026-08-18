@@ -47,13 +47,20 @@ def make_sonic_metadata(model_config) -> dict:
             "SONIC checkpoint must use action_dim=78 and action_horizon=40; "
             f"got {action_dim} and {action_horizon}"
         )
+    requires_tactile = bool(getattr(model_config, "use_tactile", False))
+    tactile_history_length = (
+        int(getattr(model_config, "tactile_history_length", 4))
+        if requires_tactile and bool(getattr(model_config, "use_tactile_temporal", False))
+        else (1 if requires_tactile else 0)
+    )
     return {
         "protocol": SONIC_PROTOCOL,
         "state_dim": SONIC_STATE_DIM,
         "action_horizon": SONIC_ACTION_HORIZON,
         "action_dim": SONIC_ACTION_DIM,
         "video_keys": list(SONIC_VIDEO_KEYS),
-        "requires_tactile": bool(getattr(model_config, "use_tactile", False)),
+        "requires_tactile": requires_tactile,
+        "tactile_history_length": tactile_history_length,
         "action_layout": {
             "motion_token": [0, MOTION_TOKEN_DIM],
             "left_hand_joints": [MOTION_TOKEN_DIM, MOTION_TOKEN_DIM + LEFT_HAND_DIM],
@@ -222,7 +229,7 @@ class SonicInputs(transforms.DataTransformFn):
             inputs["prompt"] = data["prompt"]
 
         # Training supplies three windowed device streams; inference supplies their
-        # already-concatenated 768-wide current frame.
+        # already-concatenated 768-wide causal history.
         if self.requires_tactile and "tactile" not in data:
             raise ValueError("This SONIC checkpoint requires a current tactile frame")
         if "tactile" in data:

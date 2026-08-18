@@ -70,11 +70,18 @@ def test_sonic_dream_inference_accepts_current_only_observation():
 
 def test_sonic_metadata_is_derived_from_restored_checkpoint_config():
     metadata = sonic_policy.make_sonic_metadata(
-        SimpleNamespace(action_dim=78, action_horizon=40, use_tactile=True)
+        SimpleNamespace(
+            action_dim=78,
+            action_horizon=40,
+            use_tactile=True,
+            use_tactile_temporal=True,
+            tactile_history_length=4,
+        )
     )
 
     assert metadata["protocol"] == "sonic_vla_v1"
     assert metadata["requires_tactile"] is True
+    assert metadata["tactile_history_length"] == 4
     assert metadata["video_keys"] == ["ego_view_left", "ego_view_right"]
 
 

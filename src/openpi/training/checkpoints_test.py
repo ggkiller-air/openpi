@@ -19,6 +19,9 @@ def test_jepa_model_config_round_trip(tmp_path):
         dream_state=True,
         dream_vision=True,
         vision_horizon=2,
+        use_tactile_temporal=True,
+        tactile_history_length=4,
+        use_delta_targets=True,
     )
 
     checkpoints.save_jepa_model_config(tmp_path, dream)
@@ -32,6 +35,9 @@ def test_jepa_model_config_round_trip(tmp_path):
     assert restored.dream_state
     assert restored.dream_vision
     assert restored.vision_horizon == 2
+    assert restored.use_tactile_temporal
+    assert restored.tactile_history_length == 4
+    assert restored.use_delta_targets
 
 
 def test_jepa_model_config_rejects_unknown_field(tmp_path):

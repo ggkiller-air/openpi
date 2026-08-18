@@ -106,7 +106,8 @@ the first request includes JIT compilation and can take roughly 25 seconds.
 ## `sonic_vla_v1` contract
 
 The websocket request contains `state: float32[46]`,
-`ego_view_left/right: uint8[H,W,3]`, `prompt: str`, and tactile `uint8[768]` only for HTD/JEPA.
+`ego_view_left/right: uint8[H,W,3]`, `prompt: str`, and tactile `uint8[4,768]` for the
+four-frame JEPA method. The shared bridge builds this rolling history from WBC's current packets.
 The response is finite `actions: float32[40,78]`, laid out as
 `motion_token[0:64] | left_hand[64:71] | right_hand[71:78]`. The bridge validates these
 dimensions and metadata before forwarding anything to the controller.
