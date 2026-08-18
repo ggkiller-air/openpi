@@ -72,20 +72,19 @@ Start the openpi websocket backend with the config matching the checkpoint:
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/openpi
-export HF_LEROBOT_HOME=/home/wzh/Projects/Uni_VLaT/data
-uv run python scripts/serve_policy.py --port 8000 \
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.90 \
+  .venv/bin/python scripts/serve_policy.py --port 8000 \
   policy:checkpoint \
-  --policy.config pi05_sonic_jepa \
-  --policy.dir checkpoints/pi05_sonic_jepa/train/19999
+  --policy.config pi05_sonic_htd \
+  --policy.dir /home/shared/outputs/openpi/pi05_sonic_htd/sonic_htd_20260813_openpi_first_v2/best_model/10000
 ```
 
-Install the lightweight websocket client once and expose the backend through the GR00T ZMQ
-interface expected by the shared controller:
+Expose the backend through the GR00T ZMQ interface expected by the shared controller. The
+bridge has its own websocket client; installing `openpi-client` is not required.
 
 ```bash
 cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
-uv pip install --python .venv/bin/python -e /home/wzh/Projects/Uni_VLaT/openpi/packages/openpi-client
-uv run --no-sync python -m gr00t.eval.run_openpi_bridge_server \
+.venv/bin/python gr00t/eval/run_openpi_bridge_server.py \
   --openpi-host 127.0.0.1 --openpi-port 8000 --port 5550
 ```
 
@@ -95,11 +94,14 @@ Run the existing SONIC launcher without backend-specific changes:
 cd /home/wzh/Projects/Uni_VLaT/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
   --policy-host 127.0.0.1 --policy-port 5550 \
+  --policy-timeout-ms 60000 \
   --camera-host 192.168.123.164 --tactile-zmq-host 192.168.123.164 \
   --prompt "carry the bucket"
 ```
 
 For `pi05_sonic_notactile`, omit `--tactile-zmq-host` and add `--no-use-tactile`.
+The verified HTD checkpoint fits a 24 GB RTX 4090 with the 0.90 JAX memory fraction above;
+the first request includes JIT compilation and can take roughly 25 seconds.
 
 ## `sonic_vla_v1` contract
 

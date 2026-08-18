@@ -275,7 +275,11 @@ class BaseModelConfig(abc.ABC):
         if remove_extra_params:
             params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
         at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
-        state.replace_by_pure_dict(params)
+        # Flax 0.10.2's replace_by_pure_dict coerces every numeric-looking dict
+        # key to int. SONIC's nnx.Dict tactile branches intentionally use string
+        # keys ("0" ... "7"), so that helper corrupts otherwise valid checkpoint
+        # paths. Replace values by the State's native paths instead.
+        state = _replace_state_by_pure_dict(state, params)
         return nnx.merge(graphdef, state)
 
     def load_pytorch(self, train_config, weight_path: str):
@@ -368,3 +372,9 @@ def restore_params(
     if all(kp[-1] == "value" for kp in flat_params):
         flat_params = {kp[:-1]: v for kp, v in flat_params.items()}
     return traverse_util.unflatten_dict(flat_params)
+
+
+def _replace_state_by_pure_dict(state: nnx.State, params: at.Params) -> nnx.State:
+    """Replace state values without coercing numeric-looking dictionary keys."""
+    flat_params = traverse_util.flatten_dict(params)
+    return state.map(lambda path, variable: variable.replace(flat_params[path]))

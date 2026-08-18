@@ -10,6 +10,19 @@ from openpi.shared import download
 from openpi.shared import nnx_utils
 
 
+def test_replace_state_preserves_numeric_string_dict_keys():
+    class NumericStringKeyModule(nnx.Module):
+        def __init__(self):
+            self.branches = nnx.Dict({"0": nnx.Param(jnp.array([1.0]))})
+
+    state = nnx.state(NumericStringKeyModule())
+    params = state.to_pure_dict()
+    params["branches"]["0"] = jnp.array([7.0])
+
+    restored = _model._replace_state_by_pure_dict(state, params)  # noqa: SLF001
+    assert restored["branches"]["0"].value.item() == 7.0
+
+
 def test_observation_accepts_state_jepa_window():
     config = pi0_config.Pi0Config(
         use_tactile=True,
